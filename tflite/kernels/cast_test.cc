@@ -16,6 +16,8 @@ limitations under the License.
 
 #include <algorithm>
 #include <complex>
+#include <cstring>
+#include <initializer_list>
 #include <limits>
 #include <vector>
 
@@ -26,6 +28,7 @@ limitations under the License.
 #include "tflite/c/common.h"
 #include "tflite/core/c/c_api_types.h"
 #include "tflite/kernels/cast_test_common.h"
+#include "tflite/kernels/internal/float8.h"
 #include "tflite/kernels/internal/portable_tensor_utils.h"
 #include "tflite/kernels/kernel_util.h"
 #include "tflite/kernels/test_util.h"
@@ -36,6 +39,65 @@ namespace tflite {
 namespace {
 
 using ::testing::ElementsAreArray;
+
+template <typename Float8T>
+std::vector<uint8_t> Float8Bytes(std::initializer_list<float> values) {
+  std::vector<uint8_t> result;
+  result.reserve(values.size());
+  for (float value : values) {
+    result.push_back(Float8T::ConvertFrom(value).rep());
+  }
+  return result;
+}
+
+template <typename Float8T>
+std::vector<float> Float8Values(const std::vector<uint8_t>& bytes) {
+  std::vector<float> result;
+  result.reserve(bytes.size());
+  for (uint8_t byte : bytes) {
+    result.push_back(static_cast<float>(Float8T::FromRep(byte)));
+  }
+  return result;
+}
+
+void SetRawInput(CastOpModel* model, const std::vector<uint8_t>& data) {
+  TfLiteTensor* tensor = model->GetInputTensor(0);
+  ASSERT_EQ(tensor->bytes, data.size());
+  std::memcpy(tensor->data.uint8, data.data(), data.size());
+}
+
+std::vector<uint8_t> GetRawOutput(CastOpModel* model) {
+  const TfLiteTensor* tensor = model->GetOutputTensor(0);
+  return std::vector<uint8_t>(tensor->data.uint8,
+                              tensor->data.uint8 + tensor->bytes);
+}
+
+template <typename Float8T>
+void TestCastInt4ToFloat8(TensorType output_type) {
+  CastOpModel m({TensorType_INT4, {7}}, {output_type, {7}});
+  m.Set4BitInput({-8, -3, -1, 0, 1, 3, 7});
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(GetRawOutput(&m), ElementsAreArray(Float8Bytes<Float8T>(
+                                    {-8.f, -3.f, -1.f, 0.f, 1.f, 3.f, 7.f})));
+}
+
+template <typename Float8T>
+void TestCastInt2ToFloat8(TensorType output_type) {
+  CastOpModel m({TensorType_INT2, {7}}, {output_type, {7}});
+  m.Set2BitInput({-2, -1, 0, 1, -2, -1, 0});
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(GetRawOutput(&m), ElementsAreArray(Float8Bytes<Float8T>(
+                                    {-2.f, -1.f, 0.f, 1.f, -2.f, -1.f, 0.f})));
+}
+
+template <typename Float8T>
+void TestCastUInt4ToFloat8(TensorType output_type) {
+  CastOpModel m({TensorType_UINT4, {7}}, {output_type, {7}});
+  m.SetUInt4Input({0, 1, 3, 7, 8, 12, 15});
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(GetRawOutput(&m), ElementsAreArray(Float8Bytes<Float8T>(
+                                    {0.f, 1.f, 3.f, 7.f, 8.f, 12.f, 15.f})));
+}
 
 TEST(CastOpModel, CastInt4ToFloat) {
   CastOpModel m({TensorType_INT4, {2, 3}}, {TensorType_FLOAT32, {2, 3}});
@@ -62,6 +124,14 @@ TEST(CastOpModel, CastInt4ToFloatLarge) {
   }
 }
 
+TEST(CastOpModel, CastInt4ToFloat8E4M3FN) {
+  TestCastInt4ToFloat8<float8_internal::Float8E4M3FN>(TensorType_FLOAT8_E4M3FN);
+}
+
+TEST(CastOpModel, CastInt4ToFloat8E5M2) {
+  TestCastInt4ToFloat8<float8_internal::Float8E5M2>(TensorType_FLOAT8_E5M2);
+}
+
 TEST(CastOpModel, CastInt2ToFloat) {
   CastOpModel m({TensorType_INT2, {2, 4}}, {TensorType_FLOAT32, {2, 4}});
   m.Set2BitInput({1, 0, -1, -2, 1, 0, -1, -2});
@@ -86,6 +156,14 @@ TEST(CastOpModel, CastInt2ToFloatLarge) {
   for (int i = 0; i < input.size(); ++i) {
     EXPECT_EQ(m.ExtractVector<float>(m.output())[i], input[i]);
   }
+}
+
+TEST(CastOpModel, CastInt2ToFloat8E4M3FN) {
+  TestCastInt2ToFloat8<float8_internal::Float8E4M3FN>(TensorType_FLOAT8_E4M3FN);
+}
+
+TEST(CastOpModel, CastInt2ToFloat8E5M2) {
+  TestCastInt2ToFloat8<float8_internal::Float8E5M2>(TensorType_FLOAT8_E5M2);
 }
 
 TEST(CastOpModel, CastFloatToInt4) {
@@ -432,6 +510,25 @@ TEST(CastOpModel, CastFloatToBFloat16) {
                                 static_cast<Eigen::bfloat16>(1.1f)}));
 }
 
+TEST(CastOpModel, CastFloatToFloat8E4M3FN) {
+  CastOpModel m({TensorType_FLOAT32, {2, 3}},
+                {TensorType_FLOAT8_E4M3FN, {2, 3}});
+  m.PopulateTensor<float>(m.input(), {-2.f, -1.f, -0.5f, 0.f, 1.f, 16.f});
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(GetRawOutput(&m),
+              ElementsAreArray(Float8Bytes<float8_internal::Float8E4M3FN>(
+                  {-2.f, -1.f, -0.5f, 0.f, 1.f, 16.f})));
+}
+
+TEST(CastOpModel, CastFloatToFloat8E5M2) {
+  CastOpModel m({TensorType_FLOAT32, {2, 3}}, {TensorType_FLOAT8_E5M2, {2, 3}});
+  m.PopulateTensor<float>(m.input(), {-2.f, -1.f, -0.5f, 0.f, 1.f, 16.f});
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(GetRawOutput(&m),
+              ElementsAreArray(Float8Bytes<float8_internal::Float8E5M2>(
+                  {-2.f, -1.f, -0.5f, 0.f, 1.f, 16.f})));
+}
+
 TEST(CastOpModel, CastFloat16ToFloat) {
   CastOpModel m({TensorType_FLOAT16, {3, 2}}, {TensorType_FLOAT32, {3, 2}});
   m.PopulateTensor<half>(m.input(),
@@ -458,6 +555,29 @@ TEST(CastOpModel, CastBFloat16ToFloat) {
               ElementsAreArray(ArrayFloatNear(
                   {100.f, 1.0f, 0.f, 0.400390625f, 2.f, 1.1015625f},
                   /*max_abs_err=*/0.05f)));
+}
+
+TEST(CastOpModel, CastFloat8E4M3FNToFloat) {
+  CastOpModel m({TensorType_FLOAT8_E4M3FN, {2, 3}},
+                {TensorType_FLOAT32, {2, 3}});
+  const std::vector<uint8_t> input = Float8Bytes<float8_internal::Float8E4M3FN>(
+      {-2.f, -1.f, -0.5f, 0.f, 1.f, 16.f});
+  SetRawInput(&m, input);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.ExtractVector<float>(m.output()),
+              Pointwise(FloatingPointEq(),
+                        Float8Values<float8_internal::Float8E4M3FN>(input)));
+}
+
+TEST(CastOpModel, CastFloat8E5M2ToFloat) {
+  CastOpModel m({TensorType_FLOAT8_E5M2, {2, 3}}, {TensorType_FLOAT32, {2, 3}});
+  const std::vector<uint8_t> input = Float8Bytes<float8_internal::Float8E5M2>(
+      {-2.f, -1.f, -0.5f, 0.f, 1.f, 16.f});
+  SetRawInput(&m, input);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.ExtractVector<float>(m.output()),
+              Pointwise(FloatingPointEq(),
+                        Float8Values<float8_internal::Float8E5M2>(input)));
 }
 
 TEST(CastOpModel, CastFloat16ToInt32) {
@@ -521,6 +641,15 @@ TEST(CastOpModel, CastUint4ToFloat) {
   ASSERT_EQ(m.Invoke(), kTfLiteOk);
   EXPECT_THAT(m.ExtractVector<float>(m.output()),
               ElementsAreArray({15.f, 0.f, 1.f, 8.f, 7.f, 2.f}));
+}
+
+TEST(CastOpModel, CastUint4ToFloat8E4M3FN) {
+  TestCastUInt4ToFloat8<float8_internal::Float8E4M3FN>(
+      TensorType_FLOAT8_E4M3FN);
+}
+
+TEST(CastOpModel, CastUint4ToFloat8E5M2) {
+  TestCastUInt4ToFloat8<float8_internal::Float8E5M2>(TensorType_FLOAT8_E5M2);
 }
 
 TEST(CastOpModel, CastFloatToUint4) {

@@ -82,6 +82,8 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
     case kTfLiteFloat32:
     case kTfLiteFloat16:
     case kTfLiteBFloat16:
+    case kTfLiteFloat8E4M3FN:
+    case kTfLiteFloat8E5M2:
     case kTfLiteUInt8:
     case kTfLiteInt4:
     case kTfLiteInt8:

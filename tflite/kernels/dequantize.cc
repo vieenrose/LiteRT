@@ -63,7 +63,9 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
                               op_context.input->type == kTfLiteUInt8 ||
                               op_context.input->type == kTfLiteInt8 ||
                               op_context.input->type == kTfLiteInt16 ||
-                              op_context.input->type == kTfLiteFloat16);
+                              op_context.input->type == kTfLiteFloat16 ||
+                              op_context.input->type == kTfLiteFloat8E4M3FN ||
+                              op_context.input->type == kTfLiteFloat8E5M2);
 
   if (op_context.input->type == kTfLiteInt16) {
     TF_LITE_ENSURE_EQ(context, op_context.input->params.zero_point, 0);

@@ -51,7 +51,8 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
       input->type != kTfLiteUInt8 && input->type != kTfLiteInt8 &&
       input->type != kTfLiteInt16 && input->type != kTfLiteInt64 &&
       input->type != kTfLiteBool && input->type != kTfLiteFloat16 &&
-      input->type != kTfLiteBFloat16) {
+      input->type != kTfLiteBFloat16 && input->type != kTfLiteFloat8E4M3FN &&
+      input->type != kTfLiteFloat8E5M2) {
     TF_LITE_KERNEL_LOG(context, "Type '%s' is not supported by reverse.",
                        TfLiteTypeGetName(input->type));
     return kTfLiteError;

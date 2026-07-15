@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "Eigen/Core"  // from @eigen_archive
 #include "tflite/core/c/common.h"
+#include "tflite/kernels/internal/float8.h"
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
 #include "tflite/kernels/internal/portable_tensor_utils.h"
 #include "tflite/kernels/internal/reference/dequantize.h"
@@ -49,6 +50,17 @@ inline bool IsQuantizedPerChannel(const TfLiteTensor* input) {
     return (quant_params->scale && quant_params->scale->size > 1);
   }
   return false;
+}
+
+template <typename Float8T>
+inline void DequantizeFloat8(const TfLiteTensor* input, TfLiteTensor* output) {
+  const uint8_t* input_data = GetTensorData<uint8_t>(input);
+  float* output_data = GetTensorData<float>(output);
+  const int flat_size =
+      MatchingFlatSize(GetTensorShape(input), GetTensorShape(output));
+  for (int i = 0; i < flat_size; ++i) {
+    output_data[i] = static_cast<float>(Float8T::FromRep(input_data[i]));
+  }
 }
 
 inline TfLiteStatus PerChannelDequantizeImpl(TfLiteContext* context,
@@ -202,6 +214,12 @@ TfLiteStatus DequantizeImpl(TfLiteContext* context, TfLiteNode* node,
                                 GetTensorData<float>(output));
       break;
     }
+    case kTfLiteFloat8E4M3FN:
+      DequantizeFloat8<float8_internal::Float8E4M3FN>(input, output);
+      break;
+    case kTfLiteFloat8E5M2:
+      DequantizeFloat8<float8_internal::Float8E5M2>(input, output);
+      break;
     default:
       TF_LITE_KERNEL_LOG(context, "Type %d not supported.", input->type);
       return kTfLiteError;

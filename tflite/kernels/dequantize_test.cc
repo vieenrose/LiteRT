@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include <cstdint>
+#include <cstring>
 #include <initializer_list>
 #include <memory>
 #include <vector>
@@ -21,6 +22,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include "Eigen/Core"  // from @eigen_archive
 #include "tflite/core/interpreter.h"
+#include "tflite/kernels/internal/float8.h"
 #include "tflite/kernels/test_util.h"
 #include "tflite/schema/schema_generated.h"
 
@@ -37,6 +39,26 @@ TfLiteRegistration* Register_DEQUANTIZE();
 namespace {
 
 using ::testing::ElementsAreArray;
+
+template <typename Float8T>
+std::vector<uint8_t> Float8Bytes(std::initializer_list<float> values) {
+  std::vector<uint8_t> result;
+  result.reserve(values.size());
+  for (float value : values) {
+    result.push_back(Float8T::ConvertFrom(value).rep());
+  }
+  return result;
+}
+
+template <typename Float8T>
+std::vector<float> Float8Values(const std::vector<uint8_t>& bytes) {
+  std::vector<float> result;
+  result.reserve(bytes.size());
+  for (uint8_t byte : bytes) {
+    result.push_back(static_cast<float>(Float8T::FromRep(byte)));
+  }
+  return result;
+}
 
 class DequantizeOpModel : public SingleOpModel {
  public:
@@ -60,6 +82,12 @@ class DequantizeOpModel : public SingleOpModel {
   template <typename T>
   void SetInput(std::initializer_list<T> data) {
     PopulateTensor(input_, data);
+  }
+
+  void SetRawInput(const std::vector<uint8_t>& data) {
+    TfLiteTensor* tensor = GetInputTensor(0);
+    ASSERT_EQ(tensor->bytes, data.size());
+    std::memcpy(tensor->data.uint8, data.data(), data.size());
   }
 
   template <typename T>
@@ -150,6 +178,30 @@ TEST(DequantizeOpTest, Float16) {
   EXPECT_THAT(m.GetOutput(), ElementsAreArray(ArrayFloatNear(
                                  {-535.54f, -100.0f, -1.0f, 0.f, 1.0f, 100.32f},
                                  /*max_abs_err=*/0.1f)));
+}
+
+TEST(DequantizeOpTest, Float8E4M3FN) {
+  DequantizeOpModel m(TensorType_FLOAT8_E4M3FN, {2, 3}, 1.0f, 0, 9);
+
+  const std::vector<uint8_t> input = Float8Bytes<float8_internal::Float8E4M3FN>(
+      {-2.f, -1.f, -0.5f, 0.f, 1.f, 16.f});
+  m.SetRawInput(input);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutput(),
+              ElementsAreArray(ArrayFloatNear(
+                  Float8Values<float8_internal::Float8E4M3FN>(input))));
+}
+
+TEST(DequantizeOpTest, Float8E5M2) {
+  DequantizeOpModel m(TensorType_FLOAT8_E5M2, {2, 3}, 1.0f, 0, 9);
+
+  const std::vector<uint8_t> input = Float8Bytes<float8_internal::Float8E5M2>(
+      {-2.f, -1.f, -0.5f, 0.f, 1.f, 16.f});
+  m.SetRawInput(input);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutput(),
+              ElementsAreArray(ArrayFloatNear(
+                  Float8Values<float8_internal::Float8E5M2>(input))));
 }
 
 TEST(DequantizeOpTest, Int16) {

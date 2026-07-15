@@ -163,6 +163,17 @@ TYPED_TEST(UnpackOpTest, VectorToScalar) {
       /*exp_output_data=*/{{1}, {2}, {3}, {4}, {5}}, TestFixture::TENSOR_TYPE);
 }
 
+TEST(UnpackOpTest, Float8) {
+  for (TensorType tensor_type :
+       {TensorType_FLOAT8_E4M3FN, TensorType_FLOAT8_E5M2}) {
+    Check<uint8_t>(/*axis=*/0, /*input_shape=*/{2, 2},
+                   /*input_data=*/{0x00, 0x38, 0xbc, 0x7e},
+                   /*exp_output_shape=*/{{2}, {2}},
+                   /*exp_output_data=*/{{0x00, 0x38}, {0xbc, 0x7e}},
+                   tensor_type);
+  }
+}
+
 // bool tests.
 TEST(UnpackOpTestBool, BoolThreeOutputs) {
   Check<bool>(
