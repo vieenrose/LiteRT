@@ -67,6 +67,20 @@ class GatherNdOpModel : public SingleOpModel {
   int output_;
 };
 
+void TestFloat8GatherNd(TensorType tensor_type) {
+  GatherNdOpModel model({tensor_type, {2, 2}},
+                        {TensorType_INT32, {2, 2}});
+  model.SetInput<uint8_t>({0x00, 0x38, 0xbc, 0x7e});
+  model.SetPositions<int32_t>({0, 1, 1, 0});
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
+  EXPECT_THAT(model.GetOutput<uint8_t>(), ElementsAreArray({0x38, 0xbc}));
+}
+
+TEST(GatherNdOpTest, Float8) {
+  TestFloat8GatherNd(TensorType_FLOAT8_E4M3FN);
+  TestFloat8GatherNd(TensorType_FLOAT8_E5M2);
+}
+
 TEST(GatherNdOpTest, ElementIndexingIntoMatrix) {
   GatherNdOpModel m({TensorType_FLOAT32, {2, 2}}, {TensorType_INT32, {2, 2}});
   m.SetInput<float>({1.1, 1.2, 2.1, 2.2});

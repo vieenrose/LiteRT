@@ -14,9 +14,10 @@ limitations under the License.
 ==============================================================================*/
 #include "tflite/converter/tools/versioning/op_version.h"
 
+#include <gtest/gtest.h>
+
 #include <vector>
 
-#include <gtest/gtest.h>
 #include "tflite/converter/core/c/builtin_op_data.h"
 #include "tflite/converter/core/c/tflite_types.h"
 #include "tflite/converter/schema/mutable/schema_generated.h"
@@ -249,6 +250,11 @@ TEST(OpVersionTest, VersioningLogSoftmaxTest) {
 TEST(OpVersionTest, VersioningPackTest) {
   OpSignature fake_op_sig = {};
   fake_op_sig.op = BuiltinOperator_PACK;
+  fake_op_sig.inputs = CreateOpSignatureTensorSpecs(kTfLiteFloat8E4M3FN);
+  EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 5);
+
+  fake_op_sig = {};
+  fake_op_sig.op = BuiltinOperator_PACK;
   fake_op_sig.inputs = CreateOpSignatureTensorSpecs(kTfLiteInt8);
   EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 2);
 
@@ -271,6 +277,12 @@ TEST(OpVersionTest, VersioningPackTest) {
 
 TEST(OpVersionTest, VersioningUnpackTest) {
   OpSignature fake_op_sig = {
+      .op = BuiltinOperator_UNPACK,
+      .inputs = CreateOpSignatureTensorSpecs(kTfLiteFloat8E5M2),
+  };
+  EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 6);
+
+  fake_op_sig = {
       .op = BuiltinOperator_UNPACK,
       .inputs = CreateOpSignatureTensorSpecs(kTfLiteInt8),
   };
@@ -472,6 +484,15 @@ TEST(OpVersionTest, VersioningMeanTest) {
   SimpleVersioningTestExtended(BuiltinOperator_MEAN);
 }
 
+TEST(OpVersionTest, VersioningGatherTest) {
+  OpSignature fake_op_sig = {
+      .op = BuiltinOperator_GATHER,
+      .inputs = CreateOpSignatureTensorSpecs(
+          std::vector<TfLiteType>{kTfLiteFloat8E4M3FN, kTfLiteInt32}),
+  };
+  EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 8);
+}
+
 TEST(OpVersionTest, VersioningSumTest) {
   SimpleVersioningTest(BuiltinOperator_SUM);
 }
@@ -595,10 +616,22 @@ TEST(OpVersionTest, VersioningMulTest) {
 
 TEST(OpVersionTest, VersioningPadTest) {
   SimpleVersioningTest(BuiltinOperator_PAD);
+
+  OpSignature fake_op_sig = {
+      .op = BuiltinOperator_PAD,
+      .inputs = CreateOpSignatureTensorSpecs(kTfLiteFloat8E4M3FN),
+  };
+  EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 6);
 }
 
 TEST(OpVersionTest, VersioningPadV2Test) {
   SimpleVersioningTest(BuiltinOperator_PADV2);
+
+  OpSignature fake_op_sig = {
+      .op = BuiltinOperator_PADV2,
+      .inputs = CreateOpSignatureTensorSpecs(kTfLiteFloat8E5M2),
+  };
+  EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 6);
 }
 
 TEST(OpVersionTest, VersioningConcatenationTest) {
@@ -615,6 +648,9 @@ TEST(OpVersionTest, VersioningConcatenationTest) {
 
   fake_op_sig.inputs = CreateOpSignatureTensorSpecs(kTfLiteUInt32);
   EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 4);
+
+  fake_op_sig.inputs = CreateOpSignatureTensorSpecs(kTfLiteFloat8E4M3FN);
+  EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 7);
 }
 
 TEST(OpVersionTest, VersioningSelectTest) {
@@ -786,6 +822,12 @@ TEST(OpVersionTest, VersioningDequantizeTest) {
       .inputs = CreateOpSignatureTensorSpecs(kTfLiteUInt4),
   };
   EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 8);
+
+  fake_op_sig = {
+      .op = BuiltinOperator_DEQUANTIZE,
+      .inputs = CreateOpSignatureTensorSpecs(kTfLiteFloat8E4M3FN),
+  };
+  EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 9);
 
   fake_op_sig = {
       .op = BuiltinOperator_DEQUANTIZE,
@@ -1096,8 +1138,43 @@ TEST(OpVersionTest, VersioningTransposeTest) {
   };
   EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 1);
 }
+
+TEST(OpVersionTest, VersioningSplitTest) {
+  OpSignature fake_op_sig = {
+      .op = BuiltinOperator_SPLIT,
+      .inputs = CreateOpSignatureTensorSpecs(
+          std::vector<TfLiteType>{kTfLiteInt32, kTfLiteFloat8E4M3FN}),
+  };
+  EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 5);
+}
+
+TEST(OpVersionTest, VersioningSplitVTest) {
+  OpSignature fake_op_sig = {
+      .op = BuiltinOperator_SPLIT_V,
+      .inputs = CreateOpSignatureTensorSpecs(std::vector<TfLiteType>{
+          kTfLiteFloat8E5M2, kTfLiteInt32, kTfLiteInt32}),
+  };
+  EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 3);
+}
+
+TEST(OpVersionTest, VersioningReverseV2Test) {
+  OpSignature fake_op_sig = {
+      .op = BuiltinOperator_REVERSE_V2,
+      .inputs = CreateOpSignatureTensorSpecs(
+          std::vector<TfLiteType>{kTfLiteFloat8E4M3FN, kTfLiteInt32}),
+  };
+  EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 4);
+}
+
 TEST(OpVersionTest, VersioningGatherNdOperatorTest) {
   OpSignature fake_op_sig = {
+      .op = BuiltinOperator_GATHER_ND,
+      .inputs = CreateOpSignatureTensorSpecs(
+          std::vector<TfLiteType>{kTfLiteFloat8E5M2, kTfLiteInt32}),
+  };
+  EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 6);
+
+  fake_op_sig = {
       .op = BuiltinOperator_GATHER_ND,
       .inputs = CreateOpSignatureTensorSpecs(
           std::vector<TfLiteType>{kTfLiteInt32, kTfLiteInt32}),
@@ -1148,6 +1225,9 @@ TEST(OpVersionTEst, VersioningFillTest) {
   fake_op_sig.inputs = CreateOpSignatureTensorSpecs(
       std::vector<TfLiteType>{kTfLiteInt32, kTfLiteFloat16});
   EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 4);
+  fake_op_sig.inputs = CreateOpSignatureTensorSpecs(
+      std::vector<TfLiteType>{kTfLiteInt32, kTfLiteFloat8E4M3FN});
+  EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 5);
   fake_op_sig.inputs = CreateOpSignatureTensorSpecs(
       std::vector<TfLiteType>{kTfLiteInt64, kTfLiteFloat16});
   EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 4);
@@ -1419,6 +1499,13 @@ TEST(OpVersionTest, VersioningBroadcastToTest) {
       .outputs = CreateOpSignatureTensorSpecs(kTfLiteInt16),
   };
   EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 3);
+
+  fake_op_sig = {
+      .op = BuiltinOperator_BROADCAST_TO,
+      .inputs = CreateOpSignatureTensorSpecs(kTfLiteFloat8E4M3FN),
+      .outputs = CreateOpSignatureTensorSpecs(kTfLiteFloat8E4M3FN),
+  };
+  EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 4);
 }
 
 TEST(OpVersionTest, VersioningGeluTest) {
@@ -1528,6 +1615,14 @@ TEST(OpVersionTest, VersioningSqrtTest) {
 TEST(OpVersionTest, VersioningCastTest) {
   OpSignature fake_op_sig = {};
   fake_op_sig.op = BuiltinOperator_CAST;
+  fake_op_sig.inputs = CreateOpSignatureTensorSpecs(kTfLiteFloat8E4M3FN);
+  fake_op_sig.outputs = CreateOpSignatureTensorSpecs(kTfLiteFloat32);
+  EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 9);
+
+  fake_op_sig.inputs = CreateOpSignatureTensorSpecs(kTfLiteFloat32);
+  fake_op_sig.outputs = CreateOpSignatureTensorSpecs(kTfLiteFloat8E5M2);
+  EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 9);
+
   fake_op_sig.inputs = CreateOpSignatureTensorSpecs(kTfLiteInt2);
   fake_op_sig.outputs = CreateOpSignatureTensorSpecs(kTfLiteInt32);
   EXPECT_EQ(GetBuiltinOperatorVersion(fake_op_sig), 8);

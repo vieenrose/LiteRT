@@ -12,14 +12,16 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
 #include <stdint.h>
 
+#include <cstring>
 #include <initializer_list>
 #include <type_traits>
 #include <vector>
 
-#include <gmock/gmock.h>
-#include <gtest/gtest.h>
+#include "tflite/kernels/internal/float8.h"
 #include "tflite/kernels/test_util.h"
 #include "tflite/schema/schema_generated.h"
 
@@ -28,6 +30,16 @@ namespace {
 
 using ::testing::ElementsAre;
 using ::testing::ElementsAreArray;
+
+template <typename Float8T>
+std::vector<uint8_t> Float8Bytes(std::initializer_list<float> values) {
+  std::vector<uint8_t> result;
+  result.reserve(values.size());
+  for (float value : values) {
+    result.push_back(Float8T::ConvertFrom(value).rep());
+  }
+  return result;
+}
 
 template <typename T>
 class PackOpModel : public SingleOpModel {
@@ -49,8 +61,19 @@ class PackOpModel : public SingleOpModel {
     PopulateTensor(index, data);
   }
 
+  void SetRawInput(int index, const std::vector<uint8_t>& data) {
+    TfLiteTensor* tensor = GetInputTensor(index);
+    ASSERT_EQ(tensor->bytes, data.size());
+    std::memcpy(tensor->data.uint8, data.data(), data.size());
+  }
+
   std::vector<T> GetOutput() { return ExtractVector<T>(output_); }
   std::vector<int> GetOutputShape() { return GetTensorShape(output_); }
+  std::vector<uint8_t> GetRawOutput() {
+    const TfLiteTensor* tensor = GetOutputTensor(0);
+    return std::vector<uint8_t>(tensor->data.uint8,
+                                tensor->data.uint8 + tensor->bytes);
+  }
 
  private:
   int output_;
@@ -149,6 +172,42 @@ TEST(PackOpTest, UInt32MultilDimensions) {
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(2, 2, 3));
   EXPECT_THAT(model.GetOutput(),
               ElementsAreArray({1, 2, 3, 7, 8, 9, 4, 5, 6, 10, 11, 12}));
+}
+
+TEST(PackOpTest, Float8E4M3FNThreeInputs) {
+  PackOpModel<uint8_t> model({TensorType_FLOAT8_E4M3FN, {2}}, 0, 3);
+  const std::vector<uint8_t> input0 =
+      Float8Bytes<float8_internal::Float8E4M3FN>({1.f, 4.f});
+  const std::vector<uint8_t> input1 =
+      Float8Bytes<float8_internal::Float8E4M3FN>({2.f, 5.f});
+  const std::vector<uint8_t> input2 =
+      Float8Bytes<float8_internal::Float8E4M3FN>({3.f, 6.f});
+  model.SetRawInput(0, input0);
+  model.SetRawInput(1, input1);
+  model.SetRawInput(2, input2);
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
+  EXPECT_THAT(model.GetOutputShape(), ElementsAre(3, 2));
+  EXPECT_THAT(model.GetRawOutput(),
+              ElementsAreArray({input0[0], input0[1], input1[0], input1[1],
+                                input2[0], input2[1]}));
+}
+
+TEST(PackOpTest, Float8E5M2ThreeInputs) {
+  PackOpModel<uint8_t> model({TensorType_FLOAT8_E5M2, {2}}, 0, 3);
+  const std::vector<uint8_t> input0 =
+      Float8Bytes<float8_internal::Float8E5M2>({1.f, 4.f});
+  const std::vector<uint8_t> input1 =
+      Float8Bytes<float8_internal::Float8E5M2>({2.f, 5.f});
+  const std::vector<uint8_t> input2 =
+      Float8Bytes<float8_internal::Float8E5M2>({3.f, 6.f});
+  model.SetRawInput(0, input0);
+  model.SetRawInput(1, input1);
+  model.SetRawInput(2, input2);
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
+  EXPECT_THAT(model.GetOutputShape(), ElementsAre(3, 2));
+  EXPECT_THAT(model.GetRawOutput(),
+              ElementsAreArray({input0[0], input0[1], input1[0], input1[1],
+                                input2[0], input2[1]}));
 }
 
 // int32 tests.

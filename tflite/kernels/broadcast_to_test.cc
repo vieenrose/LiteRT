@@ -30,10 +30,12 @@ class BroadcastToOpModel : public SingleOpModel {
  public:
   // BroadcastTo with dynamic shape.
   BroadcastToOpModel(std::initializer_list<int> input_shape,
-                     std::initializer_list<int> shape_shape) {
-    input_ = AddInput({GetTensorType<InputType>(), input_shape});
+                     std::initializer_list<int> shape_shape,
+                     TensorType input_tensor_type =
+                         GetTensorType<InputType>()) {
+    input_ = AddInput({input_tensor_type, input_shape});
     shape_ = AddInput({GetTensorType<ShapeType>(), shape_shape});
-    output_ = AddOutput(GetTensorType<InputType>());
+    output_ = AddOutput(input_tensor_type);
     SetBuiltinOp(BuiltinOperator_BROADCAST_TO,
                  BuiltinOptions_BroadcastToOptions,
                  CreateBroadcastToOptions(builder_).Union());
@@ -43,11 +45,13 @@ class BroadcastToOpModel : public SingleOpModel {
   // BroadcastTo with const shape.
   BroadcastToOpModel(std::initializer_list<int> input_shape,
                      std::initializer_list<int> shape_shape,
-                     std::initializer_list<ShapeType> shape_values) {
-    input_ = AddInput({GetTensorType<InputType>(), input_shape});
+                     std::initializer_list<ShapeType> shape_values,
+                     TensorType input_tensor_type =
+                         GetTensorType<InputType>()) {
+    input_ = AddInput({input_tensor_type, input_shape});
     shape_ =
         AddConstInput(GetTensorType<ShapeType>(), shape_values, shape_shape);
-    output_ = AddOutput(GetTensorType<InputType>());
+    output_ = AddOutput(input_tensor_type);
     SetBuiltinOp(BuiltinOperator_BROADCAST_TO,
                  BuiltinOptions_BroadcastToOptions,
                  CreateBroadcastToOptions(builder_).Union());
@@ -318,6 +322,17 @@ TYPED_TEST(BroadcastToOpTest, BroadcastToEmtpyShapeTest) {
   m.SetInput({1, 2, 3, 4, 5, 6});
   ASSERT_EQ(m.Invoke(), kTfLiteOk);
   EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({3, 0, 2}));
+}
+
+TEST(BroadcastToOpTest, Float8) {
+  for (TensorType tensor_type : {TensorType_FLOAT8_E4M3FN,
+                                 TensorType_FLOAT8_E5M2}) {
+    BroadcastToOpModel<uint8_t> model({1, 2}, {2}, {2, 2}, tensor_type);
+    model.SetInput({0x38, 0xbc});
+    ASSERT_EQ(model.Invoke(), kTfLiteOk);
+    EXPECT_THAT(model.GetOutput(),
+                ElementsAreArray({0x38, 0xbc, 0x38, 0xbc}));
+  }
 }
 
 }  // namespace

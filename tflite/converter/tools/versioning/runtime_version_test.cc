@@ -32,4 +32,32 @@ TEST(OpVersionTest, CompareRuntimeVersion) {
   EXPECT_FALSE(CompareRuntimeVersion("", ""));
 }
 
+TEST(OpVersionTest, Float8OperatorVersions) {
+  struct OpVersion {
+    BuiltinOperator op;
+    int version;
+  };
+  constexpr OpVersion kFloat8OperatorVersions[] = {
+      {BuiltinOperator_GATHER, 8},
+      {BuiltinOperator_SPLIT, 5},
+      {BuiltinOperator_UNPACK, 6},
+      {BuiltinOperator_DEQUANTIZE, 9},
+      {BuiltinOperator_REVERSE_V2, 4},
+      {BuiltinOperator_PACK, 5},
+      {BuiltinOperator_GATHER_ND, 6},
+      {BuiltinOperator_FILL, 5},
+      {BuiltinOperator_PAD, 6},
+      {BuiltinOperator_PADV2, 6},
+      {BuiltinOperator_CONCATENATION, 7},
+      {BuiltinOperator_SPLIT_V, 3},
+      {BuiltinOperator_BROADCAST_TO, 4},
+      {BuiltinOperator_CAST, 9},
+  };
+
+  for (const OpVersion& op_version : kFloat8OperatorVersions) {
+    EXPECT_EQ(FindMinimumRuntimeVersionForOp(op_version.op, op_version.version),
+              "2.23.0");
+  }
+}
+
 }  // namespace tflite

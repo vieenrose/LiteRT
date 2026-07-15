@@ -54,6 +54,21 @@ class ReverseOpModel : public SingleOpModel {
   int output_;
 };
 
+void TestFloat8Reverse(TensorType tensor_type) {
+  ReverseOpModel<uint8_t> model({tensor_type, {4}},
+                                {TensorType_INT32, {1}});
+  model.PopulateTensor<uint8_t>(model.input(), {0x00, 0x38, 0xbc, 0x7e});
+  model.PopulateTensor<int32_t>(model.axis(), {0});
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
+  EXPECT_THAT(model.GetOutput(),
+              ElementsAreArray({0x7e, 0xbc, 0x38, 0x00}));
+}
+
+TEST(ReverseOpTest, Float8) {
+  TestFloat8Reverse(TensorType_FLOAT8_E4M3FN);
+  TestFloat8Reverse(TensorType_FLOAT8_E5M2);
+}
+
 // float32 tests.
 TEST(ReverseOpTest, FloatOneDimension) {
   ReverseOpModel<float> model({TensorType_FLOAT32, {4}},
