@@ -332,6 +332,8 @@ typedef enum {
   kLiteRtDelegatePrecisionDefault = 0,
   kLiteRtDelegatePrecisionFp16 = 1,
   kLiteRtDelegatePrecisionFp32 = 2,
+  // FP16 storage and arithmetic with FP32 accumulation where supported.
+  kLiteRtDelegatePrecisionFp16WithFp32Accum = 3,
 } LiteRtDelegatePrecision;
 
 typedef enum {
