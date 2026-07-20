@@ -862,6 +862,25 @@ class Delegate {
     }
   }
 
+  bool IsBatchMatMulTensorModified(int tensor_index) const {
+    if (tensor_index < 0 || static_cast<size_t>(tensor_index) >=
+                                modified_batch_matmul_tensors_.size()) {
+      return false;
+    }
+    return modified_batch_matmul_tensors_[tensor_index];
+  }
+
+  void MarkBatchMatMulTensorAsModified(int tensor_index) {
+    if (tensor_index >= 0 && static_cast<size_t>(tensor_index) <
+                                 modified_batch_matmul_tensors_.size()) {
+      modified_batch_matmul_tensors_[tensor_index] = true;
+    }
+  }
+
+  void SetupModifiedTensors(int num_tensors) {
+    modified_batch_matmul_tensors_.assign(num_tensors, false);
+  }
+
  private:
   TfLiteDelegate delegate_ = {
       reinterpret_cast<void*>(this),  // .data_
@@ -911,6 +930,9 @@ class Delegate {
   // Uniquely identify var handles
   std::unordered_map<std::pair<std::string, std::string>, int, PairHash>
       var_handles_;
+
+  // Set of indices of BatchMatMul RHS tensors that have been modified.
+  std::vector<char> modified_batch_matmul_tensors_;
 };
 
 // Prepare/invoke for VarHandle that also returns the resource_id. We can't use
@@ -3342,7 +3364,7 @@ class Subgraph {
   }
 
   static TfLiteStatus VisitBatchMatMulNode(
-      xnn_subgraph_t subgraph, const Delegate& delegate,
+      xnn_subgraph_t subgraph, Delegate& delegate,
       TfLiteContext* logging_context, int node_index, TfLiteNode* node,
       const TfLiteTensor* tensors, const TfLiteBatchMatMulParams* params,
       const std::unordered_map<int, uint32_t>& input_output_tensors) {
@@ -3491,33 +3513,53 @@ class Subgraph {
                                      ? quant_params_b->zero_point->data[0]
                                      : input_b.params.zero_point;
         int32_t quantized_dimension = quant_params_b->quantized_dimension;
-        if (quant_params_b->scale->size != batch_size_b * n) {
-          if ((batch_size_b * n) % num_quant_params) {
-            TF_LITE_MAYBE_KERNEL_LOG(
-                logging_context,
-                "failed to delegate %s node #%d. unexpected number of "
-                "quantizations scales (expected a divisor of %d, got %d)",
-                EnumNameBuiltinOperator(BuiltinOperator_BATCH_MATMUL),
-                node_index, batch_size_b * n, num_quant_params);
-            return kTfLiteError;
-          }
-          TfLiteFloatArray* new_scale_b =
-              TfLiteFloatArrayCreate(num_quant_params + batch_size_b * n);
-          if (num_quant_params == 1) {
-            std::fill_n(new_scale_b->data, new_scale_b->size,
-                        input_b.params.scale);
-          } else {
-            std::copy_n(quant_params_b->scale->data, num_quant_params,
-                        new_scale_b->data);
-            for (int k = 0; k < batch_size_b * n; k++) {
-              new_scale_b->data[num_quant_params + k] =
-                  quant_params_b->scale->data[k % num_quant_params];
+        const int tensor_b_index = node->inputs->data[1];
+        // If the RHS weight tensor is shared across multiple BatchMatMul nodes,
+        // we must avoid re-expanding scales and freeing the previous scale
+        // array in subsequent visits. Otherwise, the scale array allocated in
+        // the first visit (which is already associated with the first XNNPACK
+        // node) will be freed, leading to use-after-free when that node is
+        // executed. Instead, we reuse the already expanded scale array.
+        if (!delegate.IsBatchMatMulTensorModified(tensor_b_index)) {
+          if (quant_params_b->scale->size != batch_size_b * n) {
+            if ((batch_size_b * n) % num_quant_params) {
+              TF_LITE_MAYBE_KERNEL_LOG(
+                  logging_context,
+                  "failed to delegate %s node #%d. unexpected number of "
+                  "quantizations scales (expected a divisor of %d, got %d)",
+                  EnumNameBuiltinOperator(BuiltinOperator_BATCH_MATMUL),
+                  node_index, batch_size_b * n, num_quant_params);
+              return kTfLiteError;
             }
+            TfLiteFloatArray* new_scale_b =
+                TfLiteFloatArrayCreate(num_quant_params + batch_size_b * n);
+            if (num_quant_params == 1) {
+              std::fill_n(new_scale_b->data, new_scale_b->size,
+                          input_b.params.scale);
+            } else {
+              std::copy_n(quant_params_b->scale->data, num_quant_params,
+                          new_scale_b->data);
+              for (int k = 0; k < batch_size_b * n; k++) {
+                new_scale_b->data[num_quant_params + k] =
+                    quant_params_b->scale->data[k % num_quant_params];
+              }
+            }
+            TfLiteFloatArrayFree(quant_params_b->scale);
+            new_scale_b->size = num_quant_params;
+            quant_params_b->scale = new_scale_b;
+            scale_b = new_scale_b->data + num_quant_params;
+            quantized_dimension =
+                params->adj_y ? num_dims_b - 2 : num_dims_b - 1;
+            delegate.MarkBatchMatMulTensorAsModified(tensor_b_index);
+          } else {
+            scale_b = quant_params_b->scale->data;
           }
-          TfLiteFloatArrayFree(quant_params_b->scale);
-          new_scale_b->size = num_quant_params;
-          quant_params_b->scale = new_scale_b;
-          scale_b = new_scale_b->data + num_quant_params;
+        } else {
+          // The scale array has already been expanded in a previous visit to
+          // this shared tensor. We reuse it, offsetting by its original size
+          // (which was stored in `scale->size` after expansion) to point to
+          // the start of the expanded channel-wise scales.
+          scale_b = quant_params_b->scale->data + quant_params_b->scale->size;
           quantized_dimension = params->adj_y ? num_dims_b - 2 : num_dims_b - 1;
         }
 
@@ -6879,6 +6921,7 @@ TfLiteIntArray* Delegate::PrepareOpsToDelegate(
   static_sparse_weights_.clear();
   f16_input_tensor_for_dequant_f32_tensor_.clear();
   local_id_to_resources_.clear();
+  SetupModifiedTensors(context->tensors_size);
 
   TfLiteIntArray* execution_plan = nullptr;
   if (context->GetExecutionPlan(context, &execution_plan) != kTfLiteOk) {
