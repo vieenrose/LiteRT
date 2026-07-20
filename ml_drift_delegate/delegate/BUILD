@@ -729,6 +729,12 @@ cc_library(
     name = "delegate_webgpu",
     srcs = ["delegate_webgpu.cc"],
     hdrs = ["delegate_webgpu.h"],
+    defines = select({
+        "@ml_drift//ml_drift/webgpu:ml_drift_use_dawn_proc": [
+            "ML_DRIFT_USE_DAWN_PROC",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//litert:__subpackages__"],
     deps = [
         ":delegate_data",
@@ -771,11 +777,16 @@ cc_library(
         "@ml_drift//ml_drift/webgpu:environment",
         "@ml_drift//ml_drift/webgpu:execution_environment",
         "@ml_drift//ml_drift/webgpu:instance",
+        "@ml_drift//ml_drift/webgpu:webgpu_api_util",
         "@ml_drift//ml_drift/webgpu:webgpu_headers",
     ] + select({
         "//tools/cc_target_os:emscripten": [],
         "//litert:litert_runtime_link_mode_dynamic": [
             "@dawn//dawn:dawn_headers",
+        ],
+        "@ml_drift//ml_drift/webgpu:ml_drift_use_dawn_proc": [
+            "@dawn//dawn:dawn_headers",
+            "@dawn//dawn:libdawn_proc",
         ],
         "//conditions:default": [
             "@dawn//dawn:dawn_headers",
