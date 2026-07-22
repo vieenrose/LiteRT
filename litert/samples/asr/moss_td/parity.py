@@ -9,10 +9,17 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import re
+
+TS_RE = re.compile(r"\[\d+\.\d+\]")
 
 
 def agreement(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+
+
+def strip_ts(s: str) -> str:
+    return TS_RE.sub("", s)
 
 
 def main():
@@ -26,8 +33,9 @@ def main():
         a = open(lite_p).read().strip()
         b = open(ref_p).read().strip()
         r = agreement(a, b)
-        print(f"{name}: agreement={r*100:.3f}%  identical={a == b}  "
-              f"len_lite={len(a)} len_ref={len(b)}")
+        rt = agreement(strip_ts(a), strip_ts(b))
+        print(f"{name}: agreement={r*100:.3f}%  text_only={rt*100:.3f}%  "
+              f"identical={a == b}  len_lite={len(a)} len_ref={len(b)}")
         if a != b:
             sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
             for tag, i1, i2, j1, j2 in sm.get_opcodes():
