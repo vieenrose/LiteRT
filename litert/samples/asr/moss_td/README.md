@@ -70,11 +70,62 @@ Stage gates:
 End-to-end transcripts (LiteRT f32 pipeline vs official PyTorch f32 greedy and
 vs the reference C++ (rapidspeech/moss-transcribe.cpp) f32 GGUF output):
 
-<!--PARITY_TABLE-->
+| clip | vs official PyTorch f32 | vs C++ f32 (full) | vs C++ f32 (text w/o timestamps) |
+| --- | --- | --- | --- |
+| jfk 11 s | **100.000% (byte-identical)** | 96.27% | 100.00% |
+| golden_en_5min 300 s | **100.000% (byte-identical)** | 91.55% | 98.54% |
+| golden_zh_5min 318 s | **100.000% (byte-identical)** | 56.88% | 79.62% |
+
+The C++ reference itself agrees with the official PyTorch model only to the
+same degree (en 91.52%/98.54%, zh 57.17%/79.62%): its hand-rolled f32 mel/FFT
+flips near-tie timestamp-digit tokens, and on the 318 s zh clip that flip
+cascades into a coarser segmentation. Both implementations are individually
+deterministic (the C++ rerun reproduces its stored goldens byte-for-byte).
+This port tracks the original PyTorch model exactly (the stronger parity), so
+the residual gap to the C++ goldens is a documented C++-side deviation, not a
+port defect.
+
+Quantized: q8 text-identical to f32 on jfk/zh90s (one timestamp digit differs
+on jfk); fp16 byte-identical to f32 on jfk (host XNNPACK).
+
+Decoder context: the zh 5-min clip needs prompt 4486 + 1909 generated tokens;
+use the ekv8192 decoder for 5-min single-pass decodes (ekv6144 truncates the
+tail; every token generated before the cap still matched PyTorch).
 
 ## Samsung SM-A5360 (Exynos 1280) benchmarks
 
-<!--BENCH_TABLE-->
+All CPU, 8 threads, XNNPACK. Per-signature latencies via the LiteRT
+`benchmark_model` tool (q8 variant):
+
+| signature | avg latency | peak RSS |
+| --- | --- | --- |
+| encoder (one 30 s mel chunk) | 7.60 s | 0.80 GB |
+| decoder `decode` (1 token, ekv2048) | 859 ms | 3.15 GB |
+| decoder `prefill_128` | 2.52 s | 3.17 GB |
+| decoder `prefill_1024` | 13.13 s | 3.33 GB |
+| embedder `logits` | 10.4 ms | 0.31 GB |
+| embedder `embed_1` | 5 us | 0.32 GB |
+
+Composed pipeline (q8, measured signature latencies x per-clip counts from the
+host runner) vs rs.cpp (moss-transcribe.cpp) q4mix measured end-to-end on the
+same device:
+
+| clip | LiteRT q8 (composed) | rs.cpp q4mix (measured) |
+| --- | --- | --- |
+| jfk 11 s | ~74 s, RTF 6.8 (1.15 tok/s decode) | 142.9 s, RTF 13.0, RSS 1.03 GB |
+| zh 90 s | ~367 s, RTF 4.1 | 762.6 s, RTF 8.5, RSS 1.34 GB |
+
+LiteRT q8 decode is ~1.15 tok/s vs ~0.5 tok/s for rs.cpp q4mix on this device
+— about 1.9-2.1x faster end-to-end, at the cost of ~3.2 GB peak RSS vs
+~1.3 GB (externalized f32 KV cache + benchmark-tool double-buffering; an
+integrated runner with shared KV I/O buffers would sit lower).
+
+The fp16 decoder variant OOM'd this 8 GB device hard enough to reboot it
+(XNNPACK upconverts fp16 weights to f32 at init): use q8 on-device; fp16 is a
+host/GPU-delegate variant.
+
+Host x86 benchmarks (workstation, 16 threads): see `hostbench` outputs and
+the port report; summary table in the PR description.
 
 ## Provenance
 
