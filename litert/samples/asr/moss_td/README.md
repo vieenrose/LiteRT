@@ -193,6 +193,38 @@ Pi at ~3x less RAM — the externalized-KV copies through the Python signature
 API dominate LiteRT decode on this class of device, and without dotprod the
 XNNPACK int8 kernels cannot compensate.
 
+## Shared-KV engine results (buffer-bound KV, `--engine compiled` / C++)
+
+Host x86 (16 threads, zh90s, corrected prompt):
+
+| engine | decoder | wall | peak RSS | decode | vs pinned f32 ref |
+| --- | --- | --- | --- | --- | --- |
+| rs.cpp (ggml) | q4mix | 18.4 s | 1.50 GB | 26.5 tok/s | 93.7% / 96.7% text |
+| Python interpreter | q8 ekv2048 | 72.0 s | 7.9 GB | 5.6 tok/s | 99.8% / 100% text |
+| Python compiled | q8 ekv2048 | 43.9 s | 4.0 GB | 11.0 tok/s | 99.8% / 100% text |
+| Python compiled | q8 ekv1792 1-prefill | 56.3 s* | 3.09 GB | ~9 tok/s | 99.8% / 100% text |
+| **C++ engine** | q8 ekv1792 | 52.8 s | **2.08 GB** | 8.9 tok/s | 99.8% / 100% text |
+| **C++ engine** | int4-b32 ekv1792 | 48.4 s | **1.51 GB** | 9.6 tok/s | 95.4% / 99.0% text |
+
+(*run under background load.) The C++ engine (`engine_cpp/moss_td_engine.cc`,
+LiteRT C API) holds the KV cache in TensorBuffers aliased as input AND output
+of every signature, frees the encoder after use, and emits tokens
+byte-identical to the Python engine. int4-b32 matches moss-transcribe.cpp
+q4mix's 1.50 GB peak RSS with better transcript fidelity; e2e wall is ~2.6x
+slower, floor-bound by the XNNPACK q8/int4 decode graph (56 ms/step vs ggml
+q4_K 37.7 ms on the same Xeon).
+
+f16-KV export (`--kv-dtype f16`) halves KV buffers (q8 2.84 GB Python) but
+costs ~2x decode from full-cache per-layer f32 casts; not default.
+
+Raspberry Pi 4 caveat: the prebuilt LiteRT-Next runtime (libLiteRt.so 2.1.6,
+both the Python `compiled_model` API and anything linking the .so) executes
+ARMv8 AES instructions at startup; BCM2711's Cortex-A72 has no crypto
+extension, so the shared-KV engine dies with SIGILL ("compiled with aes
+enabled ... not available on this processor"). Only the classic Interpreter
+path runs on Pi 4 (q8 zh90s: 1015 s / 3.66 GB vs rs.cpp q4mix 744 s /
+1.34 GB). A source rebuild of LiteRT without crypto would be required.
+
 ## Provenance
 
 * Weights: OpenMOSS-Team/MOSS-Transcribe-Diarize (Apache-2.0), converted from
