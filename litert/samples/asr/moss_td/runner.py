@@ -239,6 +239,75 @@ class MossTdLiteRT:
         return text
 
 
+
+
+def transcribe_compiled(args, audio):
+    """Pipeline with CompiledModel decoder/embedder (shared-KV buffers)."""
+    import time
+    from moss_td.engine_compiled import CompiledDecoder, CompiledEmbedder
+    from transformers import AutoTokenizer, WhisperFeatureExtractor
+
+    timings = {}
+    snap = common.resolve_snapshot(args.checkpoint)
+    tok = AutoTokenizer.from_pretrained(snap)
+    fe = WhisperFeatureExtractor.from_pretrained(snap)
+
+    # encoder (interpreter, freed after use)
+    t0 = time.perf_counter()
+    enc_i = load_interpreter(args.encoder, args.threads)
+    enc = Sig(enc_i, list(enc_i.get_signature_list())[0])
+    enc_input = list(enc.inputs)[0]
+    tok_lens = common.chunk_token_lengths(len(audio))
+    chunks = [np.pad(audio[i * 480000:(i + 1) * 480000],
+                     (0, 480000 - len(audio[i * 480000:(i + 1) * 480000])))
+              for i in range(len(tok_lens))]
+    feats = fe(chunks, sampling_rate=16000, padding="max_length",
+               return_tensors="np")["input_features"]
+    outs = []
+    for i, tl in enumerate(tok_lens):
+        o = enc(**{enc_input: feats[i:i + 1].astype(np.float32)})
+        outs.append(list(o.values())[0][0, :tl])
+    audio_embeds = np.concatenate(outs, axis=0)
+    del enc, enc_i
+    import gc; gc.collect()
+    timings["encoder_s"] = time.perf_counter() - t0
+
+    emb = CompiledEmbedder(args.embedder)
+    dec = CompiledDecoder(args.decoder)
+
+    t0 = time.perf_counter()
+    ids = common.build_input_ids(tok, audio_embeds.shape[0])
+    fused = emb.embed(ids)
+    apos = [i for i, t in enumerate(ids) if t == common.AUDIO_TOKEN_ID]
+    fused[apos] = audio_embeds
+    timings["fuse_s"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    last_hidden, S = dec.prefill(fused)
+    timings["prefill_s"] = time.perf_counter() - t0
+    timings["prompt_tokens"] = S
+
+    t0 = time.perf_counter()
+    logits = emb.logits(last_hidden)
+    new_ids = []
+    p = S
+    while True:
+        t = int(np.argmax(logits))
+        new_ids.append(t)
+        if t == common.EOS_TOKEN_ID or len(new_ids) >= args.max_new:
+            break
+        if p + 1 > dec.kv_len:
+            break
+        e = emb.embed([t])
+        h = dec.step(e[0], p)
+        logits = emb.logits(h)
+        p += 1
+    timings["decode_s"] = time.perf_counter() - t0
+    timings["new_tokens"] = len(new_ids)
+    text = tok.decode(new_ids, skip_special_tokens=True).strip()
+    return text, timings
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--wav", required=True)
@@ -250,6 +319,10 @@ def main():
     ap.add_argument("--max-new", type=int, default=5120)
     ap.add_argument("--out", default=None)
     ap.add_argument("--progress", action="store_true")
+    ap.add_argument("--engine", default="interpreter",
+                    choices=["interpreter", "compiled"],
+                    help="compiled = CompiledModel decoder/embedder with "
+                         "buffer-bound shared KV (no host KV round-trips)")
     ap.add_argument("--free-encoder", action="store_true",
                     help="release the encoder interpreter after audio encode "
                          "(low-memory devices)")
@@ -262,16 +335,24 @@ def main():
     assert sr == 16000, f"expected 16 kHz, got {sr}"
 
     t0 = time.perf_counter()
-    rt = MossTdLiteRT(args.encoder, args.embedder, args.decoder,
-                      args.checkpoint, args.threads)
-    load_s = time.perf_counter() - t0
-    t0 = time.perf_counter()
-    text = rt.transcribe(audio, max_new=args.max_new, progress=args.progress,
-                         free_encoder=args.free_encoder)
-    total = time.perf_counter() - t0
+    if args.engine == "compiled":
+        load_s = 0.0
+        text, timings = transcribe_compiled(args, audio)
+        total = time.perf_counter() - t0
+        rt_timings = timings
+    else:
+        rt = MossTdLiteRT(args.encoder, args.embedder, args.decoder,
+                          args.checkpoint, args.threads)
+        load_s = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        text = rt.transcribe(audio, max_new=args.max_new,
+                             progress=args.progress,
+                             free_encoder=args.free_encoder)
+        total = time.perf_counter() - t0
+        rt_timings = rt.timings
     print(text)
     import sys
-    stats = dict(rt.timings)
+    stats = dict(rt_timings)
     stats.update(load_s=round(load_s, 2), total_s=round(total, 2),
                  audio_s=round(len(audio) / 16000, 2))
     print("STATS " + " ".join(f"{k}={v if isinstance(v,int) else round(v,3)}"
