@@ -112,6 +112,18 @@ identical to the interpreter path). Remaining gap to moss-transcribe.cpp's
 + the Python harness (~0.7 GB) — a C++ CompiledModel runner with f16 KV
 should land ~2.5-3 GB.
 
+## Thread-count correction (2026-07-23, after deploy)
+
+`CompiledModel.from_file()` with no options lets the runtime choose the CPU
+thread count, and it chooses LOW. Every compiled-engine number in the tables
+above therefore UNDERSTATES the engine: with
+`Options(hardware_accelerators=CPU, cpu_options=CpuOptions(num_threads=16))`
+the dev host measures decode 9.3 -> 20.1 tok/s (2.16x) and 230-token prefill
+1.10 -> 0.28s. At 49.7 ms/step the fixed decode sits at the XNNPACK
+benchmark_model floor; the corrected x86 e2e gap to ggml q4mix is ~1.2x, not
+~2.6x. The Space engine (space/litert_engine.py) passes num_threads
+explicitly as of litert-3.
+
 ## Samsung SM-A5360 (Exynos 1280) benchmarks
 
 All CPU, 8 threads, XNNPACK. Per-signature latencies via the LiteRT

@@ -77,7 +77,7 @@ DECODER_FILE = "moss_td_decoder_v2_q4b32_ekv2560.tflite"
 TOKENIZER_FILES = ["tokenizer.json", "tokenizer_config.json", "vocab.json",
                    "merges.txt", "added_tokens.json", "special_tokens_map.json",
                    "preprocessor_config.json"]
-BUILD_ID = "litert-2"
+BUILD_ID = "litert-3"
 SR = 16000
 
 print("[startup] fetching LiteRT models…", flush=True)

@@ -92,13 +92,25 @@ def build_input_ids(tokenizer, num_audio_tokens: int) -> list[int]:
 
 
 # ----------------------------------------------------- compiled components ---
+def _cpu_opts(threads: int):
+    """CompiledModel's default lets the runtime pick the thread count, and it
+    picks LOW: measured on the 32-core dev host, the default runs decode at
+    9.3 tok/s vs 20.1 tok/s with num_threads=16 (2.16x) and prefill 4x slower.
+    Found 2026-07-23 after the user noticed the Space at ~6% CPU."""
+    from ai_edge_litert.cpu_options import CpuOptions
+    from ai_edge_litert.options import Options
+    from ai_edge_litert.hardware_accelerator import HardwareAccelerator
+    return Options(hardware_accelerators=HardwareAccelerator.CPU,
+                   cpu_options=CpuOptions(num_threads=threads))
+
+
 class CompiledDecoder:
     """prefill_*/decode signatures over ONE shared, aliased KV buffer set."""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, threads: int = 16):
         from ai_edge_litert import compiled_model as cm_lib
 
-        self.cm = cm_lib.CompiledModel.from_file(path)
+        self.cm = cm_lib.CompiledModel.from_file(path, options=_cpu_opts(threads))
         sigs = self.cm.get_signature_list()
         self.dec_idx = self.cm.get_signature_index("decode")
         din, dout = sigs["decode"]["inputs"], sigs["decode"]["outputs"]
@@ -188,10 +200,10 @@ class CompiledDecoder:
 
 
 class CompiledEmbedder:
-    def __init__(self, path: str):
+    def __init__(self, path: str, threads: int = 16):
         from ai_edge_litert import compiled_model as cm_lib
 
-        self.cm = cm_lib.CompiledModel.from_file(path)
+        self.cm = cm_lib.CompiledModel.from_file(path, options=_cpu_opts(threads))
         sigs = self.cm.get_signature_list()
         self.embed_sigs = {}
         for name in sigs:
@@ -245,8 +257,8 @@ class MossLiteRT:
         self._enc_runner = self._enc.get_signature_runner(
             list(self._enc.get_signature_list())[0])
         self._enc_input = list(self._enc_runner.get_input_details())[0]
-        self.emb = CompiledEmbedder(embedder_path)
-        self.dec = CompiledDecoder(decoder_path)
+        self.emb = CompiledEmbedder(embedder_path, threads=threads)
+        self.dec = CompiledDecoder(decoder_path, threads=threads)
         self.kv_len = self.dec.kv_len
 
     # -- windowing.py-facing contract --------------------------------------
