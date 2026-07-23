@@ -124,8 +124,24 @@ The fp16 decoder variant OOM'd this 8 GB device hard enough to reboot it
 (XNNPACK upconverts fp16 weights to f32 at init): use q8 on-device; fp16 is a
 host/GPU-delegate variant.
 
-Host x86 benchmarks (workstation, 16 threads): see `hostbench` outputs and
-the port report; summary table in the PR description.
+### Host x86 (32-core workstation, CPU-only, 16 threads)
+
+Same clips, single window, greedy. rs.cpp = moss-transcribe.cpp CPU backend;
+LiteRT = Python host runner (XNNPACK; per-step KV round-trips through numpy —
+a native integrated runner would cut most of the LiteRT decode overhead).
+
+| config | jfk 11 s wall | zh90s wall | peak RSS | decode rate (zh90s) |
+| --- | --- | --- | --- | --- |
+| rs.cpp q4mix | 3.6 s | 18.4 s | 1.5 GB | 26.5 tok/s |
+| rs.cpp f32 | 7.3 s | 35.1 s | 4.3 GB | 12.6 tok/s |
+| LiteRT q8 (ekv2048) | 17.2 s | 72.0 s | 7.9 GB | ~5.6 tok/s |
+| LiteRT fp16 (ekv2048) | 36.0 s | 125.2 s | 15.8 GB | ~4.6 tok/s |
+| LiteRT f32 (ekv6144) | 43.5 s | 195.6 s | 24.4 GB | ~1.9 tok/s |
+
+rs.cpp per-stage on zh90s (profile build): q4mix encoder 4.85 s + generate
+12.5 s; f32 encoder 4.51 s + generate 29.4 s. LiteRT q8 split on zh90s:
+encoder 1.6 s, prefill 3.0 s, decode 64.7 s (the decode loop is dominated by
+externalized-KV copies through the Python signature API).
 
 ## Provenance
 
