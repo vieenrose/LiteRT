@@ -70,27 +70,47 @@ Stage gates:
 End-to-end transcripts (LiteRT f32 pipeline vs official PyTorch f32 greedy and
 vs the reference C++ (rapidspeech/moss-transcribe.cpp) f32 GGUF output):
 
-| clip | vs official PyTorch f32 | vs C++ f32 (full) | vs C++ f32 (text w/o timestamps) |
-| --- | --- | --- | --- |
-| jfk 11 s | **100.000% (byte-identical)** | 96.27% | 100.00% |
-| golden_en_5min 300 s | **100.000% (byte-identical)** | 91.55% | 98.54% |
-| golden_zh_5min 318 s | **100.000% (byte-identical)** | 56.88% | 79.62% |
+| clip | LiteRT f32 vs pinned f32 reference |
+| --- | --- |
+| jfk 11 s | **byte-identical (100.000%)** |
+| golden_en_5min 300 s | **byte-identical (100.000%)** |
+| golden_zh_5min 318 s | **byte-identical (100.000%)** |
 
-The C++ reference itself agrees with the official PyTorch model only to the
-same degree (en 91.52%/98.54%, zh 57.17%/79.62%): its hand-rolled f32 mel/FFT
-flips near-tie timestamp-digit tokens, and on the 318 s zh clip that flip
-cascades into a coarser segmentation. Both implementations are individually
-deterministic (the C++ rerun reproduces its stored goldens byte-for-byte).
-This port tracks the original PyTorch model exactly (the stronger parity), so
-the residual gap to the C++ goldens is a documented C++-side deviation, not a
-port defect.
+The pinned references are the project's stage-1 goldens (official PyTorch f32
+via scripts/80_official_reference.py, byte-matched by the C++ implementation
+on CPU and CUDA). An earlier revision of this port interleaved time markers
+every 2 s instead of the processor's actual 5 s
+(`processor_config.json: time_marker_every_seconds = 5`), which changed the
+prompt conditioning and produced systematically finer segmentation; with the
+corrected prompt the LiteRT f32 pipeline reproduces the pinned reference
+byte-for-byte on all three clips. Audio loading, mel features and weights were
+verified bit-identical; attention backend (eager vs sdpa) does not matter.
 
-Quantized: q8 text-identical to f32 on jfk/zh90s (one timestamp digit differs
-on jfk); fp16 byte-identical to f32 on jfk (host XNNPACK).
+Quantized (corrected prompt, vs pinned f32 reference):
+q8 jfk 98.76% / text-only 100%; int4-b32 jfk 98.76% / 100%;
+q8 zh90s 99.80% / 100% (differences are single near-tie timestamp digits).
 
-Decoder context: the zh 5-min clip needs prompt 4486 + 1909 generated tokens;
-use the ekv8192 decoder for 5-min single-pass decodes (ekv6144 truncates the
-tail; every token generated before the cap still matched PyTorch).
+## Memory footprint (host, q8, zh90s, ekv2048)
+
+Interpreter-runner RSS attribution (smaps_rollup deltas):
+
+| stage | delta | running RSS |
+| --- | --- | --- |
+| python + numpy + transformers | 0.70 GB | 0.70 GB |
+| encoder invoke (XNNPACK repack + arena) | +0.80 GB | 1.68 GB |
+| embedder invoke | +0.30 GB | 1.98 GB |
+| first prefill_1024 invoke (weights pages + arena + KV in/out) | +3.25 GB | 5.24 GB |
+| decode-signature first invoke (its own KV in/out + arena) | +1.79 GB | 7.03 GB |
+
+One logical 470 MB f32 KV cache exists ~7x (numpy staging + input & output
+tensors per allocated signature). Binding ONE shared KV TensorBuffer set as
+both input and output across prefill/decode via the LiteRT CompiledModel API
+(mem_probe.py --mode compiled_full) removes the duplication:
+**7.9 -> 4.75 GB RSS and 5.5 -> 10.5 tok/s decode** (tokens verified
+identical to the interpreter path). Remaining gap to moss-transcribe.cpp's
+1.5 GB: XNNPACK repacked weight copies + per-signature arenas + f32-vs-f16 KV
++ the Python harness (~0.7 GB) — a C++ CompiledModel runner with f16 KV
+should land ~2.5-3 GB.
 
 ## Samsung SM-A5360 (Exynos 1280) benchmarks
 
