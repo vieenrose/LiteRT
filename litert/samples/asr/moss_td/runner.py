@@ -146,8 +146,12 @@ class MossTdLiteRT:
     # -- pipeline ----------------------------------------------------------
 
     def transcribe(self, audio: np.ndarray, max_new=5120, prompt=None,
-                   progress=False):
+                   progress=False, free_encoder=False):
         audio_embeds = self.encode_audio(audio)
+        if free_encoder:  # low-memory devices: drop encoder before decode
+            self.enc = None
+            import gc
+            gc.collect()
         n_audio = audio_embeds.shape[0]
         ids = common.build_input_ids(self.tok, n_audio,
                                      prompt or common.DEFAULT_PROMPT)
@@ -246,6 +250,9 @@ def main():
     ap.add_argument("--max-new", type=int, default=5120)
     ap.add_argument("--out", default=None)
     ap.add_argument("--progress", action="store_true")
+    ap.add_argument("--free-encoder", action="store_true",
+                    help="release the encoder interpreter after audio encode "
+                         "(low-memory devices)")
     args = ap.parse_args()
 
     import soundfile as sf
@@ -259,7 +266,8 @@ def main():
                       args.checkpoint, args.threads)
     load_s = time.perf_counter() - t0
     t0 = time.perf_counter()
-    text = rt.transcribe(audio, max_new=args.max_new, progress=args.progress)
+    text = rt.transcribe(audio, max_new=args.max_new, progress=args.progress,
+                         free_encoder=args.free_encoder)
     total = time.perf_counter() - t0
     print(text)
     import sys

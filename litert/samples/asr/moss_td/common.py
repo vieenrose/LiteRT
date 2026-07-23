@@ -24,8 +24,20 @@ import json
 import os
 from typing import Optional
 
-import torch
-from torch import nn
+try:  # torch is only needed for export/verify; the LiteRT runner is torch-free
+    import torch
+    from torch import nn
+except ImportError:  # pragma: no cover - device runners (e.g. Raspberry Pi)
+    class _TorchStub:
+        @staticmethod
+        def inference_mode():
+            return lambda f: f
+
+    class _NnStub:
+        Module = object
+
+    torch = _TorchStub()
+    nn = _NnStub()
 
 DEFAULT_SNAPSHOT_GLOB = (
     "~/.cache/huggingface/hub/models--OpenMOSS-Team--MOSS-Transcribe-Diarize/"
