@@ -61,6 +61,15 @@ class CompiledDecoder:
         det = self.cm.get_input_tensor_details("decode")
         mask_name = sigs["decode"]["inputs"][self.d_m]
         self.kv_len = int(det[mask_name]["shape"][-1])
+        # KV dtype + zero-init (buffers are not guaranteed zeroed)
+        kv0_name = [n for n in din if _kvkey(n)][0]
+        kv0 = det[kv0_name]
+        self.kv_dtype = np.dtype(str(kv0["dtype"]).replace("<class 'numpy.", "")
+                                 .replace("'>", "")) if not isinstance(
+                                     kv0["dtype"], type) else np.dtype(kv0["dtype"])
+        z = np.zeros(tuple(kv0["shape"]), dtype=self.kv_dtype)
+        for buf in self.kvbuf.values():
+            buf.write(z)
 
         self.prefills = {}
         for name in sigs:

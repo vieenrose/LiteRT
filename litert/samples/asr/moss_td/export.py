@@ -75,11 +75,44 @@ def export_embedder(snap, out_dir, quantize, embed_lens=(1, 128)):
     return path
 
 
-def export_decoder(snap, out_dir, quantize, kv_len, prefill_lens):
+def apply_f16_kv_patch():
+    """Store the KV cache in float16: cast K/V slices to f16 before the
+    dynamic_update_slice and cast the (updated) cache back to f32 for the
+    attention math. Halves KV I/O tensors and their runtime buffers."""
+    import torch
+    import litert_torch.generative.layers.sdpa_with_kv_update as skv
+    from litert_torch.generative.layers import kv_cache as kv_utils
+    from litert_torch.generative.layers import scaled_dot_product_attention as sdpa
+
+    def _f16_default(query, key, value, kv, input_pos, mask, config,
+                     enable_hlfb, alibi_bias=None):
+        b, seq_len, _, _ = query.shape
+        if kv is not None:
+            kv = kv_utils.update(kv, input_pos,
+                                 key.to(torch.float16),
+                                 value.to(torch.float16))
+            key = kv.k_cache.to(torch.float32)
+            value = kv.v_cache.to(torch.float32)
+        sdpa_func = (sdpa.scaled_dot_product_attention_with_hlfb
+                     if enable_hlfb else sdpa.scaled_dot_product_attention)
+        out = sdpa_func(query, key, value, config.head_dim, mask=mask,
+                        softcap=config.logit_softcap, alibi_bias=alibi_bias)
+        return out.reshape(b, seq_len, -1), kv
+
+    skv._sdpa_with_kv_update_default = _f16_default
+
+
+def export_decoder(snap, out_dir, quantize, kv_len, prefill_lens,
+                   kv_dtype="f32"):
+    import torch as _t
     from litert_torch.generative.layers import kv_cache as kv_utils
 
+    if kv_dtype == "f16":
+        apply_f16_kv_patch()
     body = common.MossDecoderBody(snap, kv_len)
-    kv = kv_utils.KVCache.from_model_config(kv_len, body.config)
+    kv = kv_utils.KVCache.from_model_config(
+        kv_len, body.config,
+        dtype=_t.float16 if kv_dtype == "f16" else _t.float32)
 
     conv = None
     for S in prefill_lens:
@@ -101,8 +134,9 @@ def export_decoder(snap, out_dir, quantize, kv_len, prefill_lens):
     }
     conv = conv.signature("decode", body, sample_kwargs=dec_kwargs)
     edge = conv.convert(quant_config=quant_config(quantize, body.config))
+    kvtag = "_kvf16" if kv_dtype == "f16" else ""
     path = os.path.join(
-        out_dir, f"moss_td_decoder_{suffix(quantize)}_ekv{kv_len}.tflite")
+        out_dir, f"moss_td_decoder_{suffix(quantize)}{kvtag}_ekv{kv_len}.tflite")
     edge.export(path)
     return path
 
@@ -117,6 +151,7 @@ def main():
                              "dynamic_int4_block32", "dynamic_int4_block128"])
     ap.add_argument("--kv-cache-max-len", type=int, default=6144)
     ap.add_argument("--prefill-lens", default="128,1024")
+    ap.add_argument("--kv-dtype", default="f32", choices=["f32", "f16"])
     ap.add_argument("--out", default="models")
     args = ap.parse_args()
 
@@ -129,7 +164,7 @@ def main():
     else:
         lens = [int(x) for x in args.prefill_lens.split(",")]
         p = export_decoder(snap, args.out, args.quantize,
-                           args.kv_cache_max_len, lens)
+                           args.kv_cache_max_len, lens, args.kv_dtype)
     print("exported:", p, f"{os.path.getsize(p)/1e6:.1f} MB")
 
 
