@@ -153,6 +153,26 @@ jfk 96.3% full / 100.0% text-only, zh90s 90.4% / 97.7% text-only. Caveat: the
 fp16 encoder is ~25x slower than the q8 encoder on x86 XNNPACK — pair the
 int4 decoder with the q8 encoder for speed.
 
+## Raspberry Pi 4 benchmarks (4x Cortex-A72, 4 threads, 3.8 GB RAM)
+
+Caveat: this A72 core has NO dotprod/i8mm — int8/int4 matmuls run on plain
+NEON, so quantized speedups are much smaller than on modern ARM cores.
+Exclusive access, load settled before each timed leg. LiteRT = Python runner
+(q8 encoder + q8 embedder + stated decoder, --free-encoder, ekv1792).
+
+| config | jfk 11 s wall | zh90s wall | peak RSS | decode (zh90s) |
+| --- | --- | --- | --- | --- |
+| rs.cpp q4mix | 106.5 s (RTF 9.7) | 744.3 s (RTF 8.3) | 1.34 GB | — |
+| LiteRT q8 dec | 290.5 s (RTF 26.4) | 1015 s (RTF 11.3) | 3.66 GB | 0.51 tok/s |
+| LiteRT int4-b32 dec | 231.0 s (RTF 21.0) | OOM-killed | 3.64 GB (jfk) | 0.57 tok/s (jfk) |
+
+The int4 zh90s leg was OOM-killed at startup (the q8 zh90s leg already peaks
+at 3.66 GB on a 3.79 GB device; the int4 leg died right after XNNPACK
+delegate init, silently). rs.cpp q4mix is ~2.7x faster than LiteRT q8 on the
+Pi at ~3x less RAM — the externalized-KV copies through the Python signature
+API dominate LiteRT decode on this class of device, and without dotprod the
+XNNPACK int8 kernels cannot compensate.
+
 ## Provenance
 
 * Weights: OpenMOSS-Team/MOSS-Transcribe-Diarize (Apache-2.0), converted from
