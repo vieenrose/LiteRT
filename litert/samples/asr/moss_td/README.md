@@ -137,11 +137,21 @@ a native integrated runner would cut most of the LiteRT decode overhead).
 | LiteRT q8 (ekv2048) | 17.2 s | 72.0 s | 7.9 GB | ~5.6 tok/s |
 | LiteRT fp16 (ekv2048) | 36.0 s | 125.2 s | 15.8 GB | ~4.6 tok/s |
 | LiteRT f32 (ekv6144) | 43.5 s | 195.6 s | 24.4 GB | ~1.9 tok/s |
+| LiteRT int4-b32 dec + fp16 enc (ekv2048) | 31.2 s | 103.5 s | 8.5 GB | ~5.9 tok/s |
 
 rs.cpp per-stage on zh90s (profile build): q4mix encoder 4.85 s + generate
 12.5 s; f32 encoder 4.51 s + generate 29.4 s. LiteRT q8 split on zh90s:
 encoder 1.6 s, prefill 3.0 s, decode 64.7 s (the decode loop is dominated by
 externalized-KV copies through the Python signature API).
+
+int4 (ai-edge-quantizer blockwise-32 weight-only via the litert-torch
+dynamic_int4_block32 recipe, same family litert-community uses for
+Gemma/Qwen int4): decoder file 251 MB (vs 456 MB q8; rs.cpp q4mix full-model
+GGUF is 759 MB incl. encoder+embeddings). int4 decode speed matches q8 in the
+Python harness (KV-copy bound); transcript agreement vs rs.cpp f32:
+jfk 96.3% full / 100.0% text-only, zh90s 90.4% / 97.7% text-only. Caveat: the
+fp16 encoder is ~25x slower than the q8 encoder on x86 XNNPACK — pair the
+int4 decoder with the q8 encoder for speed.
 
 ## Provenance
 

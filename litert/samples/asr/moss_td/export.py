@@ -30,11 +30,23 @@ def quant_config(name: str, model_config=None):
         return quant_recipes.full_fp16_recipe()
     if name == "dynamic_int8":
         return quant_recipes.full_dynamic_recipe(mcfg=model_config)
+    if name == "dynamic_int4_block32":
+        from litert_torch.generative.quantize import quant_attrs
+        return quant_recipes.full_dynamic_recipe(
+            mcfg=model_config, weight_dtype=quant_attrs.Dtype.INT4,
+            granularity=quant_attrs.Granularity.BLOCKWISE_32)
+    if name == "dynamic_int4_block128":
+        from litert_torch.generative.quantize import quant_attrs
+        return quant_recipes.full_dynamic_recipe(
+            mcfg=model_config, weight_dtype=quant_attrs.Dtype.INT4,
+            granularity=quant_attrs.Granularity.BLOCKWISE_128)
     raise ValueError(name)
 
 
 def suffix(name: str) -> str:
-    return {"none": "f32", "fp16": "fp16", "dynamic_int8": "q8"}[name]
+    return {"none": "f32", "fp16": "fp16", "dynamic_int8": "q8",
+            "dynamic_int4_block32": "q4b32",
+            "dynamic_int4_block128": "q4b128"}[name]
 
 
 def export_encoder(snap, out_dir, quantize):
@@ -101,7 +113,8 @@ def main():
                     choices=["encoder", "embedder", "decoder"])
     ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--quantize", default="none",
-                    choices=["none", "fp16", "dynamic_int8"])
+                    choices=["none", "fp16", "dynamic_int8",
+                             "dynamic_int4_block32", "dynamic_int4_block128"])
     ap.add_argument("--kv-cache-max-len", type=int, default=6144)
     ap.add_argument("--prefill-lens", default="128,1024")
     ap.add_argument("--out", default="models")
