@@ -71,11 +71,13 @@ EMBEDDER_FILE = "moss_td_embedder_q8.tflite"
 # int4 blockwise-32 decoder, KV sized for 90 s windows: prompt <= ~1250 tokens
 # + generation headroom (the engine additionally caps max_new at
 # kv_len - prompt - 1, so the budget can never run past the static cache).
-DECODER_FILE = "moss_td_decoder_q4b32_ekv2560.tflite"
+# v2: exported from the silence-robust QAT checkpoint (q4mix-v2, v4-step50) --
+# fixes the silent-audio English-hallucination loop of the base int4 decoder.
+DECODER_FILE = "moss_td_decoder_v2_q4b32_ekv2560.tflite"
 TOKENIZER_FILES = ["tokenizer.json", "tokenizer_config.json", "vocab.json",
                    "merges.txt", "added_tokens.json", "special_tokens_map.json",
                    "preprocessor_config.json"]
-BUILD_ID = "litert-1"
+BUILD_ID = "litert-2"
 SR = 16000
 
 print("[startup] fetching LiteRT models…", flush=True)
@@ -380,7 +382,8 @@ with gr.Blocks(title="MOSS-TD LiteRT — API") as demo:
         _o = gr.Textbox(label="ZeroGPU device")
         _b.click(gpu_ping, [], _o)
 
-fast_app, _, _ = demo.launch(server_name="0.0.0.0", server_port=7860,
+fast_app, _, _ = demo.launch(server_name="0.0.0.0",
+                             server_port=int(os.environ.get("PORT", "7860")),
                              mcp_server=True, prevent_thread_lock=True,
                              ssr_mode=False)
 

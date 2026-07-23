@@ -373,7 +373,7 @@ $("export").addEventListener("click", () => {
     engine: "LiteRT 2.1.6 (CPU/XNNPACK, CompiledModel shared-KV)",
     engineCommit: HEALTH.buildId || null,
     buildId: (document.querySelector('meta[name="build-id"]') || {}).content || null,
-    model: "moss-transcribe-base-q4mix.gguf",
+    model: HEALTH.model || null,  // real tflite set from /api/health
     windowed: true,
     batch: LAST.batchUsed || null,
 
