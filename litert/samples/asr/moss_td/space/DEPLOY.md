@@ -35,8 +35,9 @@ hf download Luigi/moss-transcribe-diarize-cpp --repo-type space \
 ## Weights
 
 Pulled at startup from `Luigi/moss-transcribe-diarize-litert` (public):
-encoder q8 + embedder q8 + decoder `moss_td_decoder_q4b32_ekv2560.tflite`
-+ `tokenizer/`. Total download ~0.73 GB.
+encoder q8 + embedder q8 + decoder `moss_td_decoder_v2_q4b32_ekv2560.tflite`
+(silence-robust QAT; the base `q4b32` decoders were removed from the weights
+repo 2026-07-23) + `tokenizer/`. Total download ~0.73 GB.
 
 ## What differs from the C++ Space (honest deltas, also stated in the UI)
 
