@@ -1,0 +1,8 @@
+numpy
+soundfile
+fastapi
+uvicorn
+opencc-python-reimplemented
+ai-edge-litert==2.1.6
+ml_dtypes
+transformers>=5.13,<5.15

@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="build-id" content="stage3-live-14">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MOSS-Transcribe-Diarize — LiteRT port (CPU/XNNPACK)</title>
+<style>
+  :root { --bg:#f7f7f9; --fg:#17171c; --muted:#71717a; --card:#fff;
+          --accent:#4f46e5; --border:#e4e4ea; --ok:#16a34a; --bad:#dc2626;
+          --chip:#eef2ff; --active:#fef3c7; --shadow:0 1px 3px rgba(0,0,0,.07); }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0e0e12; --fg:#ececf1; --muted:#9c9ca7; --card:#17171e;
+            --border:#26262f; --chip:#1e1b36; --active:#3b3413; --shadow:0 1px 3px rgba(0,0,0,.4); }
+  }
+  * { box-sizing:border-box; }
+  html, body { margin:0; }
+  body { font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;
+         background:var(--bg); color:var(--fg); line-height:1.55; }
+  .wrap { max-width:880px; margin:0 auto; padding:24px 16px 70px; }
+  header h1 { font-size:1.4rem; margin:0 0 4px; letter-spacing:-.01em; }
+  header .tag { display:inline-block; font-size:.75rem; font-weight:600;
+    color:var(--ok); border:1px solid var(--ok); border-radius:999px;
+    padding:1px 10px; margin-left:8px; vertical-align:3px; }
+  header p { color:var(--muted); font-size:.92rem; margin:6px 0 0; }
+  a { color:var(--accent); }
+  .card { background:var(--card); border:1px solid var(--border);
+          border-radius:14px; padding:16px 18px; margin:16px 0;
+          box-shadow:var(--shadow); }
+  .card h2 { font-size:.8rem; text-transform:uppercase; letter-spacing:.06em;
+             color:var(--muted); margin:0 0 10px; }
+  button { border:none; border-radius:10px; padding:10px 16px; font-size:.93rem;
+    cursor:pointer; background:var(--accent); color:#fff; font-weight:500; }
+  button:disabled { opacity:.4; cursor:default; }
+  button.ghost { background:var(--chip); color:var(--accent);
+    padding:7px 12px; font-size:.85rem; }
+  .chips { display:flex; gap:8px; flex-wrap:wrap; }
+  .chip { background:var(--chip); border:1px solid var(--border); border-radius:10px;
+    padding:9px 13px; font-size:.85rem; cursor:pointer; text-align:left;
+    color:var(--fg); max-width:100%; }
+  .chip:hover { border-color:var(--accent); }
+  .chip small { display:block; color:var(--muted); }
+  #drop { border:2px dashed var(--border); border-radius:12px; padding:18px;
+    text-align:center; color:var(--muted); cursor:pointer; margin-top:12px; }
+  #drop.hover { border-color:var(--accent); }
+  #status { color:var(--muted); font-size:.9rem; margin:10px 0 0; }
+  #stats { color:var(--ok); font-weight:500; font-size:.9rem; }
+  .verdict { font-weight:700; padding:3px 10px; border-radius:999px;
+    font-size:.82rem; display:inline-block; }
+  .verdict.ok { background:#dcfce7; color:#14532d; }
+  .verdict.bad { background:#fee2e2; color:#7f1d1d; }
+  @media (prefers-color-scheme: dark) {
+    .verdict.ok { background:#052e16; color:#86efac; }
+    .verdict.bad { background:#450a0a; color:#fca5a5; }
+  }
+  .seg { padding:5px 8px; border-radius:8px; cursor:pointer; }
+  .seg:hover { background:var(--chip); }
+  .seg.active { background:var(--active); }
+  .seg.hidden { display:none; }
+  audio { width:100%; height:38px; }
+  .tools { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:10px 0 0; }
+  #search { flex:1; min-width:170px; padding:8px 12px; border-radius:9px;
+    border:1px solid var(--border); background:var(--card); color:var(--fg); }
+  .tools label { font-size:.83rem; color:var(--muted); user-select:none; }
+  .seg .ts { color:var(--muted); font-size:.78rem; margin-right:8px;
+    font-variant-numeric:tabular-nums; }
+  .seg { border-left:3px solid transparent; }
+  #tail:not(:empty) { padding:5px 8px; border-left:3px dashed var(--muted);
+    color:var(--muted); font-style:italic; white-space:pre-wrap;
+    word-break:break-word; font-size:.9rem; }
+  .seg .spk { font-weight:700; margin-right:8px; }
+  /* Speaker colour is assigned by the ORDER a tag first appears, so S01 is
+     always the first voice heard. The tag text is kept next to the colour --
+     colour alone is not readable for everyone, and the [Sxx] tag is what the
+     model actually emitted. */
+  #legend { display:flex; gap:6px 10px; flex-wrap:wrap; font-size:.82rem;
+    margin:0 0 10px; }
+  #legend .lg { cursor:pointer; padding:2px 9px; border-radius:999px;
+    background:var(--chip); border:1px solid var(--border); user-select:none; }
+  #legend .lg.off { opacity:.35; }
+  #legend .lg i { display:inline-block; width:9px; height:9px; border-radius:50%;
+    margin-right:5px; }
+  pre#raw { white-space:pre-wrap; word-break:break-word; font-size:.8rem;
+    background:var(--bg); border:1px solid var(--border); border-radius:10px;
+    padding:10px; max-height:none; margin:0; }
+  table { border-collapse:collapse; font-size:.84rem; width:100%; }
+  td, th { border:1px solid var(--border); padding:4px 9px; text-align:left; }
+  footer { color:var(--muted); font-size:.79rem; margin-top:24px; }
+  .note { font-size:.85rem; color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>MOSS-Transcribe-Diarize · LiteRT port<span class="tag">int4-b32 · live</span></h1>
+    <p>
+      MOSS-Transcribe-Diarize (0.9B, Apache-2.0) on LiteRT (CPU/XNNPACK) —
+      meeting transcription for 中文/English with window-local speaker tags and
+      timestamps, <b>streamed live</b>. 中文顯示為繁體。
+    </p>
+  </header>
+
+  <div class="card">
+    <h2>How it works</h2>
+    <p class="note" style="margin:0">
+      90&nbsp;s windows · LiteRT int4-b32 decoder + q8 encoder
+      (0.73&nbsp;GB) · window-local speaker tags · everything measured
+      before shipping.
+    </p>
+    <details style="margin-top:8px">
+      <summary class="note" style="cursor:pointer">details &amp; measurements</summary>
+      <p class="note" style="margin:0">
+      Long audio is split into 90 s windows, cut at the quietest point found in
+      the last 12 s of each window (a genuine pause, not a fixed boundary).
+      Each window's <code>[Sxx]</code> tags are a LOCAL numbering the model
+      resets every call. (The C++ Space links them across windows with CAM++;
+      <b>this LiteRT build does not</b> — see the note below.)<br><br>
+      90 s was chosen after a window-length sweep (60/90/180/300/450 s) on
+      real 16-minute meetings in both languages, scored by WER and speaker
+      accuracy against AMI ground truth (English) and by whether a merged
+      segment ever crosses a genuine speaker turn rather than just combining
+      consecutive same-speaker utterances (Chinese, which has no independent
+      transcript). 90 s is the best point found for Chinese and is not
+      distinguishable from any other tested length for English. Measured
+      end-to-end on the golden 16-minute clips: <b>3.3&times; faster and about
+      half the peak memory</b> of the old single-pass approach, at WER and
+      speaker accuracy matching or beating it.<br><br>
+      Weights are the <b>LiteRT int4 blockwise-32 decoder + dynamic-int8
+      encoder/embedder (0.73 GB total)</b>. Quantization was validated
+      against the project's pinned PyTorch f32 reference, not assumed: the
+      f32 build of this exact pipeline is byte-identical to that reference on
+      all three golden clips, and the deployed int4 decoder scores 98.99%
+      text fidelity (95.45% with timestamps) on the zh 90 s window and 100%
+      on jfk — versus 96.68%/93.67% for the C++ Space's q4mix on the same
+      metric. Each window decodes with a fresh, statically-sized KV cache
+      (2560 entries) that lives entirely inside the runtime — prefill and
+      decode signatures share one set of buffer-bound KV tensors.<br><br>
+      Chinese output is converted Simplified→Traditional for display with
+      OpenCC <code>s2t</code> (character-level). The more aggressive
+      <code>s2twp</code> was measured and rejected: on this page's own zh
+      example it corrupts 高端疫苗 → 高階疫苗 and 程序委員會 → 程式委員會.<br><br>
+      Deliberately absent, same policy as the C++ Space: repetition penalty,
+      EOS-coverage suppression, loop guards, number ITN. Also absent because
+      they are rs.cpp-engine features this port does not implement: batched
+      multi-window decode, audio-KV eviction, cross-window speaker linking.
+    </p>
+    <p class="note" style="margin:8px 0 0">
+      <b>Speaker linking note:</b> cross-window CAM++ speaker
+      linking is a C++-Space feature (it needs the rapidspeech-core native
+      build). This LiteRT build ships WITHOUT it: [Sxx] tags are
+      <b>window-local</b> — the numbering restarts at every 90&nbsp;s window
+      boundary. The engine itself is Apache-2.0/MIT throughout
+      (LiteRT + converted Apache-2.0 weights).</p>
+  </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2>Golden examples — validated, verify them yourself</h2>
+    
+    <div class="chips">
+      <button class="chip" data-ex="jfk.wav" data-dur="11 s">
+        JFK inaugural (EN) <small>11 s · quick preview (no reference)</small>
+      </button>
+      <button class="chip" data-ex="golden_en_5min.wav" data-dur="5 min" data-gain="8"
+              data-ref="golden_en_5min.reference.txt">
+        AMI ES2004a (EN) <small>5 min · 4-speaker meeting · GOLDEN · quiet recording (−43 dB)</small>
+      </button>
+      <button class="chip" data-ex="golden_zh_5min.wav" data-dur="5 min"
+              data-ref="golden_zh_5min.reference.txt">
+        立法院 IVOD (ZH) <small>5 min · 真實會議 · GOLDEN</small>
+      </button>
+      <button class="chip" data-ex="stage2_en_16min.wav" data-dur="17 min" data-gain="8"
+              data-ref="stage2_en_16min.reference.txt">
+        AMI ES2004a — FULL (EN) <small>17 min · 4 speakers · long-form · quiet (−43 dB)</small>
+      </button>
+      <button class="chip" data-ex="stage2_zh_16min.wav" data-dur="16 min"
+              data-ref="stage2_zh_16min.reference.txt">
+        立法院 IVOD — 長段 (ZH) <small>16 min · 6 speakers · long-form</small>
+      </button>
+    </div>
+    <div id="drop">or drop / choose your own audio
+      <input type="file" id="file" accept="audio/*,video/*" hidden></div>
+    <div class="tools" style="margin-top:10px">
+      <button id="process" type="button" disabled>▶ Process</button>
+      <button id="cancel" class="ghost" type="button" style="display:none">✕ Cancel</button>
+      <label title="batched decode is an rs.cpp-engine feature">batch
+        <select id="batch" disabled title="batched decode is an rs.cpp-engine feature">
+          <option selected>1</option>
+        </select>
+      </label>
+      <label>volume boost
+        <select id="boost">
+          <option value="1">1x</option><option value="4">4x</option>
+          <option value="8">8x</option><option value="16">16x</option>
+        </select>
+      </label>
+    </div>
+    <p id="status">Pick an example or drop a file, then press Process.</p>
+    <p id="stats"></p>
+    <p class="note" id="slowwarn" style="display:none">
+      CPU Space — a 5-minute clip takes a few minutes, but the transcript
+      streams and committed rows are usable immediately.
+    </p>
+  </div>
+
+  <div class="card" id="paritycard" style="display:none">
+    <h2>Parity vs the PyTorch reference</h2>
+    <p id="parity"></p>
+    <div id="paritydetail" class="note"></div>
+  </div>
+
+  <div class="card" id="outcard" style="display:none">
+    <h2>Player · click any line to seek</h2>
+    <audio id="audio" controls playsinline preload="metadata"></audio>
+    <div class="tools">
+      <input type="text" id="search" placeholder="filter / 搜尋逐字稿…">
+      <label><input type="checkbox" id="follow" checked> follow playback</label>
+      <button id="export" class="ghost" type="button">export .json</button>
+    </div>
+    <h2 style="margin-top:16px">Transcript</h2>
+    <p class="note" id="progress" style="margin:0 0 6px"></p>
+    <div id="legend"></div>
+    <div id="segs"></div>
+    <div id="tail"></div>
+    <p class="note" id="tailnote" style="display:none;margin:4px 0 0">
+      ▲ live text of the current window (provisional — replaced by linked,
+      clickable rows when the window completes).</p>
+    <h2 style="margin-top:16px">Raw model output</h2>
+    <pre id="raw"></pre>
+  </div>
+
+  <div class="card">
+    <h2>Weights &amp; engine</h2>
+    <p class="note" style="margin:0">
+      <a href="https://huggingface.co/Luigi/moss-transcribe-diarize-litert">LiteRT weights (q8 enc/emb + int4-b32 dec)</a> ·
+      <a href="https://github.com/vieenrose/LiteRT/tree/moss-td-port/litert/samples/asr/moss_td">engine</a> ·
+      <a href="https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize">original model</a> ·
+      base weights, no fine-tuning.
+    </p>
+    <details style="margin-top:8px">
+      <summary class="note" style="cursor:pointer">engine &amp; quantization details</summary>
+    <table>
+      <tr><th>component</th><th>format</th><th>size</th></tr>
+      <tr><td>Whisper-medium encoder + adaptor</td><td>dynamic-int8</td><td>0.32 GB</td></tr>
+      <tr><td>tied embedding / lm_head</td><td>dynamic-int8</td><td>0.16 GB</td></tr>
+      <tr><td>Qwen3-0.6B decoder</td><td><b>int4 blockwise-32</b> (ai-edge-quantizer)</td><td>0.25 GB</td></tr>
+    </table>
+    <p class="note">
+      Engine: <a href="https://github.com/vieenrose/LiteRT/tree/moss-td-port/litert/samples/asr/moss_td">LiteRT
+      port of MOSS-TD</a> (ai-edge-litert 2.1.6, CPU/XNNPACK). The decoder runs
+      through the CompiledModel API with the KV cache held in TensorBuffers
+      aliased as both input and output of every prefill/decode call — the
+      cache never crosses the host boundary and exists exactly once.
+    </p>
+    <p class="note">
+      Parity: the f32 build of this exact pipeline is <b>byte-identical</b> to
+      the project's pinned PyTorch f32 reference on all three golden clips
+      (jfk 11&nbsp;s, en 5&nbsp;min, zh 5&nbsp;min) — transcript text, every
+      timestamp, every speaker tag. The int4-b32 decoder deployed here scores
+      98.99% text fidelity (95.45% incl. timestamps) vs that reference on the
+      zh 90&nbsp;s window and 100% text on jfk; for scale, the C++ Space's
+      q4mix build scores 96.68% / 93.67% on the same metric. Weights:
+      <a href="https://huggingface.co/Luigi/moss-transcribe-diarize-litert">Luigi/moss-transcribe-diarize-litert</a>
+      — base model, <b>no fine-tuning</b>. Model:
+      <a href="https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize">OpenMOSS MOSS-Transcribe-Diarize</a> (Apache-2.0).
+    </p>
+  </details>
+  </div>
+
+  <footer>
+    Example audio: 立法院 IVOD open data (CC-BY-4.0, via
+    <a href="https://huggingface.co/datasets/openfun/tw-ly-ivod">openfun/tw-ly-ivod</a>)
+    and the <a href="https://groups.inf.ed.ac.uk/ami/corpus/">AMI Meeting Corpus</a>
+    (CC-BY-4.0). Build: <span id="build">…</span>
+  </footer>
+</div>
+<script type="module" src="app.js?v=stage3-live-14"></script>
+</body>
+</html>
