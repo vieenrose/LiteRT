@@ -18,10 +18,12 @@ option that natively spans en/zh/**ja**/ko/es/fr/de/… in one model.
 - **Plain transcription only** — no timestamps-with-speakers, no diarization
   (unlike MOSS-TD). It emits punctuated, cased text. VoxSum's pyannote-seg +
   CAM++ stages are still needed if you want speaker labels for this backend.
-- **zh-TW**: the base model's `zh-TW` slot is **untrained** (100% CER). Produce
-  Traditional output the way VoxSum already does it — decode with the `zh-CN`
-  slot, then OpenCC `s2t` (the `app/src/main/assets/opencc/` tables are already
-  shipped). A future zh-TW fine-tune will fix the native slot.
+- **zh-TW**: the base model's `zh-TW` slot was **untrained** (100% CER); this
+  build **warm-starts it from the zh-CN slot** (a lossless prompt-projector
+  weight copy baked into `nemotron_prompt_fuse_fp32.tflite`), so `zh-TW` now
+  works natively — **15.78% CER e2e**, on par with zh-CN. Output is Simplified;
+  OpenCC `s2t` → Traditional (the `app/src/main/assets/opencc/` tables ship
+  already). A future zh-TW fine-tune will add native Traditional + far-field.
 - **Accuracy / size (this q4-mix build)**: ASCEND zh-CN **CER 16.32%** vs the
   fp32 reference 15.61% (n=100) — INT4 is near-lossless here. Bundle **663 MB**
   (encoder 596 INT4 + prompt-fuse 18 + decoder 31 + joint 18, fp16). Bigger than X-ASR (295 MB)
@@ -31,7 +33,7 @@ option that natively spans en/zh/**ja**/ko/es/fr/de/… in one model.
 
 Published, pinned by revision, at
 [`Luigi/nemotron-asr-litert`](https://huggingface.co/Luigi/nemotron-asr-litert)
-(commit `2e0cbe6f`). Four flatbuffers + the HF tokenizer/processor, mirroring the
+(commit `75ec9fbb`, v1.1). Four flatbuffers + the HF tokenizer/processor, mirroring the
 existing `models/manifest.json` `asr[]` shape (id / url / sha256 / license):
 
 | id | file | size | precision |
@@ -47,7 +49,7 @@ Ready-to-paste `asr[]` entries (url @ the pinned commit + sha256) — encoder sh
 
 ```json
 { "id": "nemotron-encoder-q4", "kind": "ASR",
-  "url": "https://huggingface.co/Luigi/nemotron-asr-litert/resolve/2e0cbe6f42459ee8d932b7692df00880387e7999/nemotron_encoder_q4.tflite",
+  "url": "https://huggingface.co/Luigi/nemotron-asr-litert/resolve/75ec9fbbce099ef2630e14f6eceaf1576ec107dc/nemotron_encoder_q4.tflite",
   "sha256": "9e817d29ab20013de9962a8c347e7f68f9a896eef1e29ffcf9b0e0a0f1ef691c",
   "license": "nvidia-open-model-license" }
 ```
@@ -86,7 +88,7 @@ OpenMDW-1.1 base; the QAT checkpoint is the only trained artifact.
 | joint | `enc` (1,1,1024) f32, `dec` (1,1,640) f32 | `logits` (1,1,13088) f32 |
 
 - **Language slots** (from `processor_config.json` `prompt_dictionary`):
-  `en-US`=0, `zh-CN`=4, **`zh-TW`=5 (dead)**, `ja-JP`=10, `ko`=14, `es-ES`=2,
+  `en-US`=0, `zh-CN`=4, **`zh-TW`=5 (warm-started, works)**, `ja-JP`=10, `ko`=14, `es-ES`=2,
   `fr`=8, `de`=9, … Pass the slot as a one-hot[128] into the fusion step.
 - **Timestamps**: encoder subsamples 8×, hop 160 @16k ⇒ **0.08 s per output
   frame**. `ts(frame) = frame_index × 0.08 s`.

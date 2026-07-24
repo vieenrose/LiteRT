@@ -49,8 +49,13 @@ outliers the QAT trained the model to keep.
 
 Naive INT4 PTQ (no QAT) costs +0.85 CER (zh) / +3.65 WER (en) vs FP; the QAT
 (label-based RNN-T self-distillation on the FP model's own greedy output)
-recovers it. zh-TW: the base model's zh-TW slot is untrained (100% CER) — use the
-zh-CN slot + OpenCC `s2t` (`runner.py --s2t`).
+recovers it.
+
+**zh-TW (v1.1):** the base model's zh-TW slot is untrained (100% CER); this build
+**warm-starts it from zh-CN** — a lossless prompt-projector weight copy baked into
+`nemotron_prompt_fuse_fp32.tflite` (`export.py --warm-start-zhtw`). The zh-TW slot
+now works natively at **15.78% CER e2e** (on par with zh-CN). Output is Simplified;
+add OpenCC `s2t` for Traditional (`runner.py --lang zh-TW --s2t`).
 
 ## Export
 

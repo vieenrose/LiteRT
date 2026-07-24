@@ -32,7 +32,7 @@ MODEL_ID = "nvidia/nemotron-3.5-asr-streaming-0.6b"
 BLOCK = 128
 
 
-def load_model(checkpoint=None):
+def load_model(checkpoint=None, warm_start_zhtw=False):
     Model = getattr(transformers, "Nemotron3_5AsrForRNNT")
     m = Model.from_pretrained(MODEL_ID, dtype=torch.float32).eval()
     if checkpoint:
@@ -41,6 +41,12 @@ def load_model(checkpoint=None):
                  for k, v in sd.items()}
         _, unexpected = m.load_state_dict(remap, strict=False)
         assert not unexpected, f"unexpected checkpoint keys: {unexpected[:3]}"
+    if warm_start_zhtw:
+        # Revive the untrained zh-TW slot (5) by copying the working zh-CN column (4)
+        # of the prompt projector — lossless (zh-TW slot then == zh-CN); s2t for output.
+        with torch.no_grad():
+            w = m.prompt_projector.linear_1.weight  # [intermediate, 1024+128]
+            w[:, 1024 + 5].copy_(w[:, 1024 + 4])
     return m
 
 
@@ -183,11 +189,13 @@ def main():
     ap.add_argument("--prebake", action="store_true", help="bake QAT fake-quant grid before export")
     ap.add_argument("--T", type=int, default=1101, help="fixed encoder mel-frame length (offline)")
     ap.add_argument("--keep-fp32", action="store_true", help="keep decoder/joint at fp32 (default fp16)")
+    ap.add_argument("--warm-start-zhtw", action="store_true",
+                    help="revive the zh-TW slot from zh-CN (affects prompt_fuse only)")
     ap.add_argument("--out", default="models")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     fp16 = not a.keep_fp32
-    m = load_model(a.checkpoint)
+    m = load_model(a.checkpoint, a.warm_start_zhtw)
     if a.component in ("encoder", "all"):
         export_encoder(m, a.out, a.T, a.prebake)
     if a.component in ("decoder", "all"):
