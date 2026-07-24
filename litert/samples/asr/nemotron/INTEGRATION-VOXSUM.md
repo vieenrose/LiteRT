@@ -4,7 +4,7 @@
 
 > Companion to the port at `litert/samples/asr/nemotron/` in
 > [`vieenrose/LiteRT`](https://github.com/vieenrose/LiteRT) (branch
-> `nemotron-port`). This describes wiring that port into
+> `nemotron`). This describes wiring that port into
 > [VoxSumDroid](https://github.com/vieenrose/VoxSumDroid) as a **third LiteRT ASR
 > backend**, alongside X-ASR (zipformer) and MOSS-TD.
 
