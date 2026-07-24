@@ -29,9 +29,10 @@ option that natively spans en/zh/**ja**/ko/es/fr/de/… in one model.
 
 ## Model files — manifest.json entries
 
-Four flatbuffers + the HF tokenizer/processor. Host them in an HF repo (e.g.
-`Luigi/nemotron-asr-litert`) pinned by revision, mirroring the existing
-`models/manifest.json` `asr[]` shape (id / url / sha256 / license / default):
+Published, pinned by revision, at
+[`Luigi/nemotron-asr-litert`](https://huggingface.co/Luigi/nemotron-asr-litert)
+(commit `2e0cbe6f`). Four flatbuffers + the HF tokenizer/processor, mirroring the
+existing `models/manifest.json` `asr[]` shape (id / url / sha256 / license):
 
 | id | file | size | precision |
 |---|---|---|---|
@@ -41,8 +42,18 @@ Four flatbuffers + the HF tokenizer/processor. Host them in an HF repo (e.g.
 | `nemotron-joint-fp16` | `nemotron_joint_fp16.tflite` | 18 MB | fp16 |
 | `nemotron-tokenizer` | `tokenizer.json` (HF ParakeetTokenizer) | 0.8 MB | — |
 
+Ready-to-paste `asr[]` entries (url @ the pinned commit + sha256) — encoder shown;
+`processor_config.json` + `config.json` pull the same way:
+
+```json
+{ "id": "nemotron-encoder-q4", "kind": "ASR",
+  "url": "https://huggingface.co/Luigi/nemotron-asr-litert/resolve/2e0cbe6f42459ee8d932b7692df00880387e7999/nemotron_encoder_q4.tflite",
+  "sha256": "9e817d29ab20013de9962a8c347e7f68f9a896eef1e29ffcf9b0e0a0f1ef691c",
+  "license": "nvidia-open-model-license" }
+```
+
 Regenerate any file from the port: `python -m nemotron.export --component <c>
---checkpoint qat_q4mix_enc.pt --prebake`. All Apache-2.0-compatible export of an
+--checkpoint qat_q4mix_enc.pt --prebake`. Numerics-preserving export of an
 OpenMDW-1.1 base; the QAT checkpoint is the only trained artifact.
 
 ## Runtime — the graph flow
@@ -127,7 +138,6 @@ from the MOSS-LiteRT / X-ASR backends.
   with multiple length signatures (as X-ASR does). Padding is masked-safe:
   pad to `T`, trim output to `ceil(T_valid/8)` (padding-vs-exact cos 0.9996).
 - **No diarization.** Speaker labels still need pyannote-seg + CAM++.
-- Model files **not yet uploaded** to a public HF repo / no sha256 pins yet.
 - On-device latency/RTF **not yet measured** (desktop XNNPACK INT4 encoder is
   ~0.3 s per short clip; expect the phone to be the real gate — benchmark before
   making it a default backend).
