@@ -2,10 +2,10 @@
 # Copyright 2026. Apache-2.0.
 """Offline transcription with the q4-mix Nemotron LiteRT graphs (RNN-T greedy).
 
-encoder(INT4) -> host prompt-fusion (fp32) -> decoder/joint(fp32) greedy.
-The prompt_projector fusion runs host-side in fp32 (INT4 collapses it); for a
-fully on-device build it becomes a 4th tiny fp32 graph. zh-TW output = the
-zh-CN slot + OpenCC s2t (the base model has no working zh-TW slot).
+Fully on-device: encoder(INT4) -> prompt_fuse(fp32) -> decoder/joint(fp16) greedy,
+four tflite graphs, no torch math at inference (torch here only drives the HF
+mel/tokenizer for the desktop demo; on Android those are native). zh-TW output =
+the zh-CN slot + OpenCC s2t (the base model has no working zh-TW slot).
 
 Usage:
   python -m nemotron.runner --models models/ --wav clip.wav --lang zh-CN [--s2t]
@@ -41,8 +41,8 @@ def transcribe(models, wav, lang, s2t=False, max_sym=10):
                            return_tensors="pt")["prompt_ids"].item()
     enc = Graph(os.path.join(models, "nemotron_encoder_q4.tflite"))
     fuse = Graph(os.path.join(models, "nemotron_prompt_fuse_fp32.tflite"))  # fp32, on-device
-    dec = Graph(os.path.join(models, "nemotron_decoder_fp32.tflite"))
-    jnt = Graph(os.path.join(models, "nemotron_joint_fp32.tflite"))
+    dec = Graph(os.path.join(models, "nemotron_decoder_fp16.tflite"))
+    jnt = Graph(os.path.join(models, "nemotron_joint_fp16.tflite"))
     T_enc = enc.ins[0]["shape"][1]
     n_feat = enc.by_shape((1, T_enc, 128))["index"]
     fz_h = next(d for d in fuse.ins if len(d["shape"]) == 3)["index"]

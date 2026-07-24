@@ -100,6 +100,31 @@ def int4_fc_recipe(block=BLOCK):
     return r
 
 
+def fp16_recipe():
+    from ai_edge_quantizer import recipe, qtyping
+    from ai_edge_quantizer.recipe import AlgorithmName
+    r = recipe.dynamic_wi8_afp32()
+    for e in r:
+        e["algorithm_key"] = AlgorithmName.FLOAT_CASTING
+        e["operation"] = qtyping.TFLOperationName.ALL_SUPPORTED
+        e["op_config"]["weight_tensor_config"]["num_bits"] = 16
+        e["op_config"]["weight_tensor_config"]["dtype"] = qtyping.TensorDataType.FLOAT
+        e["op_config"]["compute_precision"] = qtyping.ComputePrecision.FLOAT
+    return r
+
+
+def _to_fp16(fp32_path):
+    """fp16-cast a converted fp32 graph (numerically lossless; halves size)."""
+    from ai_edge_quantizer import quantizer
+    q = quantizer.Quantizer(float_model=fp32_path)
+    q.load_quantization_recipe(fp16_recipe())
+    out = fp32_path.replace("_fp32.tflite", "_fp16.tflite")
+    with open(out, "wb") as f:
+        f.write(q.quantize().quantized_model)
+    os.remove(fp32_path)
+    return out
+
+
 def export_encoder(m, out_dir, T, prebake):
     if prebake:
         n = 0
@@ -122,18 +147,22 @@ def export_encoder(m, out_dir, T, prebake):
     print(f"encoder -> {out} ({os.path.getsize(out)/1e6:.0f} MB)")
 
 
-def export_decoder(m, out_dir):
+def export_decoder(m, out_dir, fp16=True):
     dec = DecStep(m.decoder).eval()
     s = (torch.zeros(1, 1, dtype=torch.int32), torch.zeros(2, 1, 640), torch.zeros(2, 1, 640))
     out = os.path.join(out_dir, "nemotron_decoder_fp32.tflite")
     litert_torch.convert(dec, s, quant_config=None).export(out)
+    if fp16:
+        out = _to_fp16(out)
     print(f"decoder -> {out} ({os.path.getsize(out)/1e6:.0f} MB)")
 
 
-def export_joint(m, out_dir):
+def export_joint(m, out_dir, fp16=True):
     jnt = JointStep(m).eval()
     out = os.path.join(out_dir, "nemotron_joint_fp32.tflite")
     litert_torch.convert(jnt, (torch.zeros(1, 1, 1024), torch.zeros(1, 1, 640)), quant_config=None).export(out)
+    if fp16:
+        out = _to_fp16(out)
     print(f"joint -> {out} ({os.path.getsize(out)/1e6:.0f} MB)")
 
 
@@ -153,16 +182,18 @@ def main():
     ap.add_argument("--checkpoint", default=None, help="QAT encoder.layers state_dict (optional)")
     ap.add_argument("--prebake", action="store_true", help="bake QAT fake-quant grid before export")
     ap.add_argument("--T", type=int, default=1101, help="fixed encoder mel-frame length (offline)")
+    ap.add_argument("--keep-fp32", action="store_true", help="keep decoder/joint at fp32 (default fp16)")
     ap.add_argument("--out", default="models")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
+    fp16 = not a.keep_fp32
     m = load_model(a.checkpoint)
     if a.component in ("encoder", "all"):
         export_encoder(m, a.out, a.T, a.prebake)
     if a.component in ("decoder", "all"):
-        export_decoder(m, a.out)
+        export_decoder(m, a.out, fp16)
     if a.component in ("joint", "all"):
-        export_joint(m, a.out)
+        export_joint(m, a.out, fp16)
     if a.component in ("prompt_fuse", "all"):
         export_prompt_fuse(m, a.out, a.T)
 

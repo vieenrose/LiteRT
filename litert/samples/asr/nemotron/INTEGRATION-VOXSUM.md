@@ -23,13 +23,13 @@ option that natively spans en/zh/**ja**/ko/es/fr/de/… in one model.
   slot, then OpenCC `s2t` (the `app/src/main/assets/opencc/` tables are already
   shipped). A future zh-TW fine-tune will fix the native slot.
 - **Accuracy / size (this q4-mix build)**: ASCEND zh-CN **CER 16.32%** vs the
-  fp32 reference 15.61% (n=100) — INT4 is near-lossless here. Bundle **693 MB**
-  (encoder 596 INT4 + decoder 61 + joint 36, fp32). Bigger than X-ASR (295 MB)
+  fp32 reference 15.61% (n=100) — INT4 is near-lossless here. Bundle **663 MB**
+  (encoder 596 INT4 + prompt-fuse 18 + decoder 31 + joint 18, fp16). Bigger than X-ASR (295 MB)
   but multilingual.
 
 ## Model files — manifest.json entries
 
-Three flatbuffers + the HF tokenizer/processor. Host them in an HF repo (e.g.
+Four flatbuffers + the HF tokenizer/processor. Host them in an HF repo (e.g.
 `Luigi/nemotron-asr-litert`) pinned by revision, mirroring the existing
 `models/manifest.json` `asr[]` shape (id / url / sha256 / license / default):
 
@@ -37,8 +37,8 @@ Three flatbuffers + the HF tokenizer/processor. Host them in an HF repo (e.g.
 |---|---|---|---|
 | `nemotron-encoder-q4` | `nemotron_encoder_q4.tflite` | 596 MB | INT4 FC (blockwise-128) + fp32 convs/norms |
 | `nemotron-prompt-fuse` | `nemotron_prompt_fuse_fp32.tflite` | 18 MB | fp32 |
-| `nemotron-decoder-fp32` | `nemotron_decoder_fp32.tflite` | 61 MB | fp32 |
-| `nemotron-joint-fp32` | `nemotron_joint_fp32.tflite` | 36 MB | fp32 |
+| `nemotron-decoder-fp16` | `nemotron_decoder_fp16.tflite` | 31 MB | fp16 |
+| `nemotron-joint-fp16` | `nemotron_joint_fp16.tflite` | 18 MB | fp16 |
 | `nemotron-tokenizer` | `tokenizer.json` (HF ParakeetTokenizer) | 0.8 MB | — |
 
 Regenerate any file from the port: `python -m nemotron.export --component <c>
@@ -94,7 +94,7 @@ The INT4 encoder uses **dynamic-range INT4 `FULLY_CONNECTED`**. The classic
 the same `com.google.ai.edge.litert:litert:2.1.6` AAR already vendored for the
 MOSS-LiteRT backend (`app/src/main/jniLibs/**/libLiteRt.so`, see
 `mosslite/PROVENANCE.md`) — with an Android NNAPI / XNNPACK-QD8 delegate.
-decoder/joint are fp32 and run on either path.
+prompt-fuse / decoder / joint are fp16 and run on either path.
 
 **Set the CPU thread count explicitly** — `CompiledModel` otherwise picks a very
 low default (measured ~8× slower). Use the big-core count on big.LITTLE.
@@ -126,7 +126,6 @@ from the MOSS-LiteRT / X-ASR backends.
   on VoxSum's Silero-VAD boundaries and concatenate, or re-export the encoder
   with multiple length signatures (as X-ASR does). Padding is masked-safe:
   pad to `T`, trim output to `ceil(T_valid/8)` (padding-vs-exact cos 0.9996).
-- **decoder/joint are fp32** — convert to fp16 to shave ~50 MB if size matters.
 - **No diarization.** Speaker labels still need pyannote-seg + CAM++.
 - Model files **not yet uploaded** to a public HF repo / no sha256 pins yet.
 - On-device latency/RTF **not yet measured** (desktop XNNPACK INT4 encoder is
