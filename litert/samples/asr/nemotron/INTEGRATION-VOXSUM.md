@@ -76,7 +76,7 @@ OpenMDW-1.1 base; the QAT checkpoint is the only trained artifact.
        k = argmax(logits[13088]);  if k==BLANK: break
        emit k; dec_out,h,c = decoder(token=k, h, c)
    → detok(ParakeetTokenizer, strip <lang-tag> tokens, ▁→space)
-   → [if zh-TW] OpenCC s2t
+   → [if zh-TW] OpenCC s2t  → [optional] ITN (wetext, spoken→written: 百分之五十→50%)
 ```
 
 **Graph I/O contract** (all batch-1):
@@ -139,6 +139,9 @@ from the MOSS-LiteRT / X-ASR backends.
   on VoxSum's Silero-VAD boundaries and concatenate, or re-export the encoder
   with multiple length signatures (as X-ASR does). Padding is masked-safe:
   pad to `T`, trim output to `ceil(T_valid/8)` (padding-vs-exact cos 0.9996).
+- **ITN** (inverse text normalization, spoken→written numerals) is deterministic
+  post-processing (`wetext` / WeTextProcessing WFST), not in the weights — a
+  fine-tune to bake it in was tried and does not beat post-proc (see below).
 - **No diarization.** Speaker labels still need pyannote-seg + CAM++.
 - On-device latency/RTF **not yet measured** (desktop XNNPACK INT4 encoder is
   ~0.3 s per short clip; expect the phone to be the real gate — benchmark before
