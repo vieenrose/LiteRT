@@ -39,14 +39,14 @@ def transcribe(models, wav, lang, s2t=False, max_sym=10):
         transformers.utils.hub.cached_file(MODEL_ID, "processor_config.json"))))["prompt_dictionary"][lang] \
         if False else proc(np.zeros(16000, np.float32), sampling_rate=16000, language=lang,
                            return_tensors="pt")["prompt_ids"].item()
-    pp = getattr(transformers, "Nemotron3_5AsrForRNNT").from_pretrained(
-        MODEL_ID, dtype=torch.float32).eval().prompt_projector  # fp32 prompt fusion, host-side
-
     enc = Graph(os.path.join(models, "nemotron_encoder_q4.tflite"))
+    fuse = Graph(os.path.join(models, "nemotron_prompt_fuse_fp32.tflite"))  # fp32, on-device
     dec = Graph(os.path.join(models, "nemotron_decoder_fp32.tflite"))
     jnt = Graph(os.path.join(models, "nemotron_joint_fp32.tflite"))
     T_enc = enc.ins[0]["shape"][1]
     n_feat = enc.by_shape((1, T_enc, 128))["index"]
+    fz_h = next(d for d in fuse.ins if len(d["shape"]) == 3)["index"]
+    fz_oh = fuse.by_shape((1, 128))["index"]
     d_tok = dec.by_shape((1, 1))["index"]
     d_hc = sorted(d["index"] for d in dec.ins if tuple(d["shape"]) == (2, 1, 640))
     j_enc = jnt.by_shape((1, 1, 1024))["index"]; j_dec = jnt.by_shape((1, 1, 640))["index"]
@@ -66,10 +66,9 @@ def transcribe(models, wav, lang, s2t=False, max_sym=10):
     Tc = feats.shape[1]; valid = math.ceil(Tc / 8)
     f = feats.numpy()
     f = np.concatenate([f, np.zeros((1, T_enc - Tc, 128), np.float32)], 1) if Tc < T_enc else f[:, :T_enc]
-    hidden = torch.from_numpy(enc.run({n_feat: f})[0][:, :valid])
-    onehot = torch.zeros(1, 128); onehot[0, slot] = 1.0
-    with torch.no_grad():
-        fused = pp(torch.cat([hidden, onehot[:, None, :].expand(-1, hidden.shape[1], -1)], -1)).numpy()
+    hidden = enc.run({n_feat: f})[0]  # [1,Tp,1024] full
+    onehot = np.zeros((1, 128), np.float32); onehot[0, slot] = 1.0
+    fused = fuse.run({fz_h: hidden.astype(np.float32), fz_oh: onehot})[0][:, :valid]  # trim to valid
 
     h = np.zeros((2, 1, 640), np.float32); c = np.zeros((2, 1, 640), np.float32)
     do, h, c = dec_step(BLANK, h, c); ids = []

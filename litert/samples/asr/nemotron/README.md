@@ -12,18 +12,20 @@ diarization.
 
 ## Model files
 
-Three flatbuffers, mirroring the reference split (embedding lookup + lm_head stay
+Four flatbuffers, mirroring the reference split (embedding lookup + lm_head stay
 inside the decoder/joint graphs; every file < 2 GB):
 
 | file | I/O | precision |
 | --- | --- | --- |
 | `nemotron_encoder_q4.tflite` | `input_features` (1,T,128) f32 → `hidden` (1,T',1024) f32 | **INT4** FC (blockwise-128), convs/norms fp32 |
+| `nemotron_prompt_fuse_fp32.tflite` | `hidden` (1,T',1024) + `one_hot` (1,128) → `fused` (1,T',1024) | fp32 |
 | `nemotron_decoder_fp32.tflite` | `token` (1,1) i32 + `h`,`c` (2,1,640) → `dec_out` (1,1,640) + `h`,`c` | fp32 |
 | `nemotron_joint_fp32.tflite` | `enc` (1,1,1024) + `dec` (1,1,640) → `logits` (1,1,13088) | fp32 (folds `encoder_projector` 1024→640) |
 
-The `prompt_projector` language fusion (between encoder and joint) runs host-side
-in fp32 — INT4 there collapses the model. For a fully on-device build it becomes a
-4th tiny fp32 graph (`hidden` + `one_hot(128)` → conditioned 1024).
+The `prompt_projector` language fusion (between encoder and greedy) is its own
+tiny fp32 graph — INT4 there collapses the model. It runs once per utterance;
+the exported `nemotron_prompt_fuse_fp32.tflite` is numerically identical to the
+in-model fusion (end-to-end CER unchanged).
 
 ## Why q4-mix (not uniform INT4)
 

@@ -36,6 +36,7 @@ Three flatbuffers + the HF tokenizer/processor. Host them in an HF repo (e.g.
 | id | file | size | precision |
 |---|---|---|---|
 | `nemotron-encoder-q4` | `nemotron_encoder_q4.tflite` | 596 MB | INT4 FC (blockwise-128) + fp32 convs/norms |
+| `nemotron-prompt-fuse` | `nemotron_prompt_fuse_fp32.tflite` | 18 MB | fp32 |
 | `nemotron-decoder-fp32` | `nemotron_decoder_fp32.tflite` | 61 MB | fp32 |
 | `nemotron-joint-fp32` | `nemotron_joint_fp32.tflite` | 36 MB | fp32 |
 | `nemotron-tokenizer` | `tokenizer.json` (HF ParakeetTokenizer) | 0.8 MB | — |
@@ -51,7 +52,7 @@ OpenMDW-1.1 base; the QAT checkpoint is the only trained artifact.
    │  128-bin log-mel  (n_fft=512, hop=160, win=400, preemph=0.97, RAW log-mel — NO per-feature norm)
    ▼
  encoder_q4(mel[1,T,128])              → hidden[1,T',1024]          (T' = ceil(T/8))
-   │  prompt fusion (fp32, host/4th-graph):
+   │  prompt fusion (nemotron_prompt_fuse_fp32.tflite):
    │    fused = prompt_projector( concat(hidden, one_hot(slot)[128]) )   # [1,T',1024], NO residual
    ▼
  RNN-T greedy over T' frames:
@@ -78,10 +79,12 @@ OpenMDW-1.1 base; the QAT checkpoint is the only trained artifact.
   `fr`=8, `de`=9, … Pass the slot as a one-hot[128] into the fusion step.
 - **Timestamps**: encoder subsamples 8×, hop 160 @16k ⇒ **0.08 s per output
   frame**. `ts(frame) = frame_index × 0.08 s`.
-- **Prompt fusion** is currently host-side fp32 (INT4 collapses it). Two options
-  on-device: (a) recommended — export it as a 4th tiny fp32 graph
-  `prompt_fuse(hidden[1,T',1024], one_hot[1,128]) → fused[1,T',1024]`; or (b)
-  do the two matmuls in Kotlin (`linear_1` 1152→I, ReLU, `linear_2` I→1024).
+- **Prompt fusion** is a dedicated fp32 graph `nemotron_prompt_fuse_fp32.tflite`
+  (`hidden[1,T',1024]` + `one_hot[1,128]` → `fused[1,T',1024]`; INT4 collapses
+  it). Called once per utterance, numerically identical to the in-model fusion
+  (end-to-end CER unchanged at 16.32%). Fixed `T'` = encoder output length (139
+  for T=1101) — feed the full untrimmed encoder output, fuse, then trim to
+  `ceil(T_valid/8)`.
 
 ## Delegate — this is the important bit
 
@@ -123,7 +126,6 @@ from the MOSS-LiteRT / X-ASR backends.
   on VoxSum's Silero-VAD boundaries and concatenate, or re-export the encoder
   with multiple length signatures (as X-ASR does). Padding is masked-safe:
   pad to `T`, trim output to `ceil(T_valid/8)` (padding-vs-exact cos 0.9996).
-- **Prompt fusion 4th graph** not yet exported (host-side today) — see above.
 - **decoder/joint are fp32** — convert to fp16 to shave ~50 MB if size matters.
 - **No diarization.** Speaker labels still need pyannote-seg + CAM++.
 - Model files **not yet uploaded** to a public HF repo / no sha256 pins yet.

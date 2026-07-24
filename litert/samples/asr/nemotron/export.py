@@ -79,6 +79,15 @@ class JointStep(nn.Module):
         return self.joint(decoder_hidden_states=dec, encoder_hidden_states=self.encoder_projector(enc))
 
 
+class PromptFuse(nn.Module):
+    """Language conditioning: hidden[1,Tp,1024] + one_hot[1,128] -> fused[1,Tp,1024].
+    fp32 (INT4 collapses it). Runs once per utterance, between encoder and greedy."""
+    def __init__(self, model): super().__init__(); self.pp = model.prompt_projector
+    def forward(self, hidden, one_hot):
+        oh = one_hot[:, None, :].expand(-1, hidden.shape[1], -1)
+        return self.pp(torch.cat([hidden, oh], -1))
+
+
 def int4_fc_recipe(block=BLOCK):
     from ai_edge_quantizer import recipe, qtyping
     from ai_edge_quantizer.recipe import AlgorithmName
@@ -128,9 +137,19 @@ def export_joint(m, out_dir):
     print(f"joint -> {out} ({os.path.getsize(out)/1e6:.0f} MB)")
 
 
+def export_prompt_fuse(m, out_dir, T):
+    with torch.no_grad():
+        Tp = EncOffline(m.encoder)(torch.zeros(1, T, 128)).shape[1]  # encoder output frames for this T
+    pf = PromptFuse(m).eval()
+    out = os.path.join(out_dir, "nemotron_prompt_fuse_fp32.tflite")
+    litert_torch.convert(pf, (torch.zeros(1, Tp, 1024), torch.zeros(1, 128)), quant_config=None).export(out)
+    print(f"prompt_fuse -> {out} ({os.path.getsize(out)/1e6:.1f} MB, Tp={Tp})")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--component", required=True, choices=["encoder", "decoder", "joint", "all"])
+    ap.add_argument("--component", required=True,
+                    choices=["encoder", "decoder", "joint", "prompt_fuse", "all"])
     ap.add_argument("--checkpoint", default=None, help="QAT encoder.layers state_dict (optional)")
     ap.add_argument("--prebake", action="store_true", help="bake QAT fake-quant grid before export")
     ap.add_argument("--T", type=int, default=1101, help="fixed encoder mel-frame length (offline)")
@@ -144,6 +163,8 @@ def main():
         export_decoder(m, a.out)
     if a.component in ("joint", "all"):
         export_joint(m, a.out)
+    if a.component in ("prompt_fuse", "all"):
+        export_prompt_fuse(m, a.out, a.T)
 
 
 if __name__ == "__main__":
