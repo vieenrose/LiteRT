@@ -31,17 +31,24 @@ option that natively spans en/zh/**ja**/ko/es/fr/de/… in one model.
   6.3% of Traditional chars fail a round-trip vs 0.1% Simplified). VoxSum already
   ships the tables in `app/src/main/assets/opencc/`. `runner.py --s2t` does it;
   `--itn` adds inverse text normalization (百分之五十 → 50%).
-- **Which prompt slot for Taiwan Mandarin? Use `zh-CN` (slot 4), not `zh-TW`.**
-  Measured on the shipped v2 q4-mix build, two disjoint Common Voice zh-TW slices:
-  | slot | clips 0-120 | clips 200-440 |
-  |---|---|---|
-  | `zh-TW` (5) | 13.90 | 16.33 |
-  | `auto` (101) | 13.79 | 16.02 |
-  | **`zh-CN` (4)** | **13.20** | **15.97** |
-  The ranking replicates on both slices. `zh-CN` wins because it has far more
-  pretraining behind it than the fine-tuned zh-TW slot; `auto` is ~equivalent.
-  All three land within ~0.7 CER, so this is a small optimisation — but free.
-  Output is Simplified either way, so the OpenCC `s2t` step is unchanged.
+- **Prompt slot for Taiwan Mandarin: any of `auto` / `zh-CN` / `zh-TW` works on
+  v2 — but `auto` was *broken* on the base model.** Measured on identical Common
+  Voice zh-TW clips (n=120):
+  | slot | base (fp32) | **v2 FT (fp32)** | v2 q4-mix LiteRT |
+  |---|---|---|---|
+  | `auto` (101) | 50.58 | **11.33** | 13.79 |
+  | `zh-CN` (4) | 38.43 | 11.57 | **13.20** |
+  | `zh-TW` (5) | 38.43 | 12.03 | 13.90 |
+  On the base, `auto` was by far the worst choice (50.58). After the fine-tune it
+  is the **best** in fp32 — a 4.5× gain, the largest of any slot — because
+  training used NVIDIA's `prompt_mode: unified`, which alternates the real
+  language ID with the `auto` prompt (`unified_auto_ratio: 0.5`), so the auto
+  path was trained directly on zh-TW.
+  On v2 the three slots land within ~0.7 CER and the ranking flips between fp32
+  and the quantized build, so **treat them as equivalent** and pick on product
+  grounds: `auto` if the user may switch languages, an explicit slot if you know
+  the language. Output is Simplified in every case — the OpenCC `s2t` step is
+  unchanged.
 - **The fine-tune did not cost other languages.** vs base (FLEURS/LibriSpeech,
   fp32): ko −0.80, de −0.75, ja −0.41, hi −0.17, en −0.13 (all *improved*),
   ar +0.21 (flat), fr +1.55 and es +1.27 (the only regressions; fr still beats
