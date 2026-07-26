@@ -1,6 +1,10 @@
 # Integration note — Nemotron-3.5-ASR 3.5 (q4-mix, LiteRT) as a VoxSum ASR backend
 
-*Status: integration guide · 2026-07-24 · first draft for the q4-mix port*
+*Status: integration guide · updated 2026-07-26 for the **zh-TW fine-tuned v2** build*
+
+> **v2 (2026-07-26)** replaces the v1.1 warm-start weights with a **zh-TW
+> fine-tuned** model: on-device zh-TW CER **13.90 → from ~38**, ~2.7× better, same
+> 663 MB. Repo and pins changed — see "Model files" below.
 
 > Companion to the port at `litert/samples/asr/nemotron/` in
 > [`vieenrose/LiteRT`](https://github.com/vieenrose/LiteRT) (branch
@@ -15,26 +19,43 @@ Base [nvidia/nemotron-3.5-asr-streaming-0.6b](https://huggingface.co/nvidia/nemo
 languages via a 128-slot language prompt. It is the only current VoxSum ASR
 option that natively spans en/zh/**ja**/ko/es/fr/de/… in one model.
 
+- **zh-TW is fine-tuned in v2.** The base model's `zh-TW` slot was untrained
+  (~100% CER). v1.1 revived it with a warm-start (prompt-column copy); **v2 goes
+  further with a real fine-tune** on Common Voice zh-TW + IVOD 立法院 long-form,
+  taking Common Voice zh-TW CER from **38.43 → 12.03 (fp32)** and **13.90 on this
+  q4-mix build**. Source model:
+  [`Luigi/nemotron-3.5-asr-streaming-0.6b-zhtw`](https://huggingface.co/Luigi/nemotron-3.5-asr-streaming-0.6b-zhtw).
+- **Output is Simplified Chinese — apply OpenCC `s2t` for Traditional.** This is
+  not a preference, it's a hard constraint: the 13,087-token tokenizer has no
+  tokens for many common Traditional characters (點 兒 區 說 麼 嗎 **灣** 黨 體 產;
+  6.3% of Traditional chars fail a round-trip vs 0.1% Simplified). VoxSum already
+  ships the tables in `app/src/main/assets/opencc/`. `runner.py --s2t` does it;
+  `--itn` adds inverse text normalization (百分之五十 → 50%).
+- **The fine-tune did not cost other languages.** vs base (FLEURS/LibriSpeech,
+  fp32): ko −0.80, de −0.75, ja −0.41, hi −0.17, en −0.13 (all *improved*),
+  ar +0.21 (flat), fr +1.55 and es +1.27 (the only regressions; fr still beats
+  NVIDIA's published 15.93). Full table in the source model card.
 - **Plain transcription only** — no timestamps-with-speakers, no diarization
-  (unlike MOSS-TD). It emits punctuated, cased text. VoxSum's pyannote-seg +
-  CAM++ stages are still needed if you want speaker labels for this backend.
-- **zh-TW**: the base model's `zh-TW` slot was **untrained** (100% CER); this
-  build **warm-starts it from the zh-CN slot** (a lossless prompt-projector
-  weight copy baked into `nemotron_prompt_fuse_fp32.tflite`), so `zh-TW` now
-  works natively — **15.78% CER e2e**, on par with zh-CN. Output is Simplified;
-  OpenCC `s2t` → Traditional (the `app/src/main/assets/opencc/` tables ship
-  already). A future zh-TW fine-tune will add native Traditional + far-field.
-- **Accuracy / size (this q4-mix build)**: ASCEND zh-CN **CER 16.32%** vs the
-  fp32 reference 15.61% (n=100) — INT4 is near-lossless here. Bundle **663 MB**
-  (encoder 596 INT4 + prompt-fuse 18 + decoder 31 + joint 18, fp16). Bigger than X-ASR (295 MB)
-  but multilingual.
+  (unlike MOSS-TD). VoxSum's pyannote-seg + CAM++ stages are still needed for
+  speaker labels on this backend.
+- **Size**: 663 MB (encoder 596 INT4 + prompt-fuse 18 + decoder 31 + joint 18).
+  Bigger than X-ASR (295 MB) but multilingual.
+- **Not a zh-en replacement for X-ASR.** Measured head-to-head on identical
+  clips, X-ASR wins both of its languages (zh-TW 6.66 CER / en 2.18 WER vs this
+  model's 12.03 / 2.58 at fp32). Nemotron's value here is **breadth** — 25
+  languages including ja/ko/es/fr/de that X-ASR cannot do at all. Keep both.
 
 ## Model files — manifest.json entries
 
 Published, pinned by revision, at
-[`Luigi/nemotron-asr-litert`](https://huggingface.co/Luigi/nemotron-asr-litert)
-(commit `75ec9fbb`, v1.1). Four flatbuffers + the HF tokenizer/processor, mirroring the
-existing `models/manifest.json` `asr[]` shape (id / url / sha256 / license):
+[`Luigi/nemotron-asr-litert-zhtw`](https://huggingface.co/Luigi/nemotron-asr-litert-zhtw)
+(commit `bbc906fe`, **v2 fine-tuned**). Four flatbuffers + the HF
+tokenizer/processor, mirroring the existing `models/manifest.json` `asr[]` shape
+(id / url / sha256 / license).
+
+> The base-faithful (non-zh-TW) build stays at
+> [`Luigi/nemotron-asr-litert`](https://huggingface.co/Luigi/nemotron-asr-litert)
+> if you ever want the unmodified model.
 
 | id | file | size | precision |
 |---|---|---|---|
@@ -44,19 +65,48 @@ existing `models/manifest.json` `asr[]` shape (id / url / sha256 / license):
 | `nemotron-joint-fp16` | `nemotron_joint_fp16.tflite` | 18 MB | fp16 |
 | `nemotron-tokenizer` | `tokenizer.json` (HF ParakeetTokenizer) | 0.8 MB | — |
 
-Ready-to-paste `asr[]` entries (url @ the pinned commit + sha256) — encoder shown;
-`processor_config.json` + `config.json` pull the same way:
+Ready-to-paste `asr[]` entries (URLs pinned to commit `bbc906fe`, sha256 verified):
 
 ```json
 { "id": "nemotron-encoder-q4", "kind": "ASR",
-  "url": "https://huggingface.co/Luigi/nemotron-asr-litert/resolve/75ec9fbbce099ef2630e14f6eceaf1576ec107dc/nemotron_encoder_q4.tflite",
-  "sha256": "9e817d29ab20013de9962a8c347e7f68f9a896eef1e29ffcf9b0e0a0f1ef691c",
+  "url": "https://huggingface.co/Luigi/nemotron-asr-litert-zhtw/resolve/bbc906fe254b8c1b84d53fc64b9204efd3d08b57/nemotron_encoder_q4.tflite",
+  "sha256": "b1b3c93add91ee2253c8d6d24172614a83f6572720dea0150fb34285be53a0c2",
+  "license": "nvidia-open-model-license" },
+{ "id": "nemotron-prompt-fuse", "kind": "ASR",
+  "url": "https://huggingface.co/Luigi/nemotron-asr-litert-zhtw/resolve/bbc906fe254b8c1b84d53fc64b9204efd3d08b57/nemotron_prompt_fuse_fp32.tflite",
+  "sha256": "21c59326f8633c3824f9e92dcaded6148978dcd53591846c85c9b1ac982a1bba",
+  "license": "nvidia-open-model-license" },
+{ "id": "nemotron-decoder-fp16", "kind": "ASR",
+  "url": "https://huggingface.co/Luigi/nemotron-asr-litert-zhtw/resolve/bbc906fe254b8c1b84d53fc64b9204efd3d08b57/nemotron_decoder_fp16.tflite",
+  "sha256": "e92dfa900ebd9d7cd87429c9bb7c304b7e3fa61dc233c74f2e074fbb4342222b",
+  "license": "nvidia-open-model-license" },
+{ "id": "nemotron-joint-fp16", "kind": "ASR",
+  "url": "https://huggingface.co/Luigi/nemotron-asr-litert-zhtw/resolve/bbc906fe254b8c1b84d53fc64b9204efd3d08b57/nemotron_joint_fp16.tflite",
+  "sha256": "d728fb09aa034b85b1549772fef6cfc4f85d7df0faf59c6db4ad2e7fbbfdc848",
+  "license": "nvidia-open-model-license" },
+{ "id": "nemotron-tokenizer", "kind": "ASR",
+  "url": "https://huggingface.co/Luigi/nemotron-asr-litert-zhtw/resolve/bbc906fe254b8c1b84d53fc64b9204efd3d08b57/tokenizer.json",
+  "sha256": "3f3d481deb073b64c2082e8c7860d487a3a62774bf4e9e4faac83007e181f246",
+  "license": "nvidia-open-model-license" },
+{ "id": "nemotron-processor-config", "kind": "ASR",
+  "url": "https://huggingface.co/Luigi/nemotron-asr-litert-zhtw/resolve/bbc906fe254b8c1b84d53fc64b9204efd3d08b57/processor_config.json",
+  "sha256": "ec47870f1091ea4f25539208387b45b902c92d0e3f997a30061ef88f73437ab0",
+  "license": "nvidia-open-model-license" },
+{ "id": "nemotron-config", "kind": "ASR",
+  "url": "https://huggingface.co/Luigi/nemotron-asr-litert-zhtw/resolve/bbc906fe254b8c1b84d53fc64b9204efd3d08b57/config.json",
+  "sha256": "3fcc4f88c746b9f4b3f0b174d7b5db1bb6eb3997c209f6199186f560d21b85ca",
   "license": "nvidia-open-model-license" }
 ```
 
-Regenerate any file from the port: `python -m nemotron.export --component <c>
---checkpoint qat_q4mix_enc.pt --prebake`. Numerics-preserving export of an
-OpenMDW-1.1 base; the QAT checkpoint is the only trained artifact.
+Regenerate any file from the port (the exporter takes any HF model dir/id):
+
+```bash
+python -m nemotron.export --component all --model Luigi/nemotron-3.5-asr-streaming-0.6b-zhtw --prebake --out models/
+```
+
+`--prebake` bakes the INT4 grid into the weights before quantization (worth
+~0.8 CER). The fine-tuned source model is the only trained artifact; the export
+itself is numerics-preserving.
 
 ## Runtime — the graph flow
 
@@ -88,14 +138,14 @@ OpenMDW-1.1 base; the QAT checkpoint is the only trained artifact.
 | joint | `enc` (1,1,1024) f32, `dec` (1,1,640) f32 | `logits` (1,1,13088) f32 |
 
 - **Language slots** (from `processor_config.json` `prompt_dictionary`):
-  `en-US`=0, `zh-CN`=4, **`zh-TW`=5 (warm-started, works)**, `ja-JP`=10, `ko`=14, `es-ES`=2,
+  `en-US`=0, `zh-CN`=4, **`zh-TW`=5 (fine-tuned in v2)**, `ja-JP`=10, `ko`=14, `es-ES`=2,
   `fr`=8, `de`=9, … Pass the slot as a one-hot[128] into the fusion step.
 - **Timestamps**: encoder subsamples 8×, hop 160 @16k ⇒ **0.08 s per output
   frame**. `ts(frame) = frame_index × 0.08 s`.
 - **Prompt fusion** is a dedicated fp32 graph `nemotron_prompt_fuse_fp32.tflite`
   (`hidden[1,T',1024]` + `one_hot[1,128]` → `fused[1,T',1024]`; INT4 collapses
   it). Called once per utterance, numerically identical to the in-model fusion
-  (end-to-end CER unchanged at 16.32%). Fixed `T'` = encoder output length (139
+  (numerically identical to the in-model fusion). Fixed `T'` = encoder output length (139
   for T=1101) — feed the full untrimmed encoder output, fuse, then trim to
   `ceil(T_valid/8)`.
 
@@ -143,6 +193,8 @@ from the MOSS-LiteRT / X-ASR backends.
   post-processing (`wetext` / WeTextProcessing WFST), not in the weights — a
   fine-tune to bake it in was tried and does not beat post-proc (see below).
 - **No diarization.** Speaker labels still need pyannote-seg + CAM++.
+- **zh-TW is Simplified out + OpenCC `s2t`** — native Traditional is impossible
+  without extending the tokenizer (see above). Not a bug; don't "fix" it.
 - On-device latency/RTF **not yet measured** (desktop XNNPACK INT4 encoder is
   ~0.3 s per short clip; expect the phone to be the real gate — benchmark before
   making it a default backend).
