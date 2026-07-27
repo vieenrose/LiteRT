@@ -15,9 +15,22 @@
 ## What the model does — and why add it
 
 Base [nvidia/nemotron-3.5-asr-streaming-0.6b](https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b)
-(0.6B FastConformer-RNNT, OpenMDW-1.1): **multilingual** streaming ASR, 25
-languages via a 128-slot language prompt. It is the only current VoxSum ASR
-option that natively spans en/zh/**ja**/ko/es/fr/de/… in one model.
+(0.6B FastConformer-RNNT, OpenMDW-1.1): **multilingual** streaming ASR,
+**40 language-locales** via a 128-slot language prompt. It is the only current
+VoxSum ASR option that natively spans en/zh/**ja**/ko/es/fr/de/… in one model.
+
+NVIDIA splits the 40 locales into three tiers (verified against the model card,
+2026-07-27):
+
+| Tier | Locales |
+|---|---|
+| **Transcription-ready (19)** — use as-is | en-US, en-GB, es-US, es-ES, fr-FR, fr-CA, it-IT, pt-BR, pt-PT, nl-NL, de-DE, tr-TR, ru-RU, ar-AR, hi-IN, ja-JP, ko-KR, vi-VN, uk-UA |
+| **Broad-coverage (13)** — production, lower accuracy | pl-PL, sv-SE, cs-CZ, nb-NO, da-DK, bg-BG, fi-FI, hr-HR, sk-SK, **zh-CN**, hu-HU, ro-RO, et-EE |
+| **Adaptation-ready (8)** — tokenizer-only, needs fine-tuning | el-GR, lt-LT, lv-LV, mt-MT, sl-SI, he-IL, th-TH, nn-NO |
+
+**32 locales work out of the box** (tiers 1–2). Only expose tiers 1–2 in the UI;
+tier 3 will produce unusable output without a fine-tune. Note `zh-CN` sits in
+the *broad-coverage* tier — consistent with routing Chinese to X-ASR instead.
 
 - **zh-TW is fine-tuned in v2.** The base model's `zh-TW` slot was untrained
   (~100% CER). v1.1 revived it with a warm-start (prompt-column copy); **v2 goes
@@ -62,6 +75,56 @@ option that natively spans en/zh/**ja**/ko/es/fr/de/… in one model.
   clips, X-ASR wins both of its languages (zh-TW 6.66 CER / en 2.18 WER vs this
   model's 12.03 / 2.58 at fp32). Nemotron's value here is **breadth** — 25
   languages including ja/ko/es/fr/de that X-ASR cannot do at all. Keep both.
+
+## Engine routing — the product decision (2026-07-27)
+
+VoxSum ships **three** ASR engines. None replaces another. Route by **language
+first, then device class**:
+
+| Order | Condition | Engine | Measured |
+|---|---|---|---|
+| 1 | zh / en **and** high-end device | **MOSS-TD** | best accuracy; only engine with built-in diarization + timestamps |
+| 2 | zh / en (default) | **X-ASR** (295 MB) | zh-TW **6.66** CER · en **2.18** WER |
+| 3 | any other language | **Nemotron** (663 MB) | 32 usable locales; zh-TW 12.03 / en 2.58 |
+
+X-ASR keeps zh/en because it *ties Whisper-large-v3* on Common Voice zh-TW
+(6.66 vs 6.66 CER — 57 errors / 856 chars each, measured on identical clips) at
+roughly 1/95th the encoder FLOPs. Nemotron's zh-TW fine-tune plateaued near
+12.4 CER across 47.5h → 429h of training data, so the remaining gap is corpus
+size rather than tuning.
+
+**Do not describe Nemotron as "the European engine" in UI or docs.** It also
+covers ja-JP, ko-KR, vi-VN, ar-AR, hi-IN and tr-TR. The correct rule is
+*"not zh, not en → Nemotron"*.
+
+### Settings-menu spec (for VoxSumDroid)
+
+VoxSumDroid is not vendored here, so this is a spec rather than a patch.
+Suggested `Settings → Speech recognition`:
+
+**1. "Recognition engine"** — list preference, default **Automatic**:
+
+| Option | Summary string |
+|---|---|
+| `Automatic` *(default)* | "Picks the best engine for the language and your device." |
+| `X-ASR — Chinese & English` | "Fastest. Best accuracy for 中文 and English. 295 MB." |
+| `Nemotron — 32 languages` | "Japanese, Korean, European languages and more. 663 MB. Chinese output is Simplified." |
+| `MOSS-TD — highest accuracy` | "Chinese & English only. Adds speaker labels and timestamps. Needs a recent, high-end phone." |
+
+`Automatic` implements the table above. Gate MOSS-TD on a device check
+(RAM + SoC class); if the device does not qualify, hide or disable the option
+with the reason shown rather than letting it be selected and fail at runtime.
+
+**2. "Transcript script"** — visible only when the resolved engine is Nemotron
+and the language is Chinese. Options `Traditional 繁體` *(default)* /
+`Simplified 简体`. Traditional applies OpenCC `s2t`/`s2tw` from
+`app/src/main/assets/opencc/`. Nemotron's tokenizer cannot emit many common
+Traditional characters, so this conversion is mandatory, not cosmetic — do not
+offer a "raw model output" option.
+
+**3. "Language"** — when the engine resolves to Nemotron, populate from the
+**32** tier-1/tier-2 locales above. Do **not** list the 8 adaptation-ready
+locales; they need a fine-tune and will produce unusable text.
 
 ## Model files — manifest.json entries
 
