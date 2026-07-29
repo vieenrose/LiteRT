@@ -1,0 +1,8 @@
+{
+ "path": "/home/luigi/.cache/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/3e22461f65e89153144f8adb70e3b8c2cc9845a7/model.safetensors",
+ "offset": 1422298392,
+ "rows": 262144,
+ "cols": 8960,
+ "dtype": "bf16",
+ "scale": 16.0
+}
