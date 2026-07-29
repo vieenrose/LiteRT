@@ -315,8 +315,11 @@ struct Component {
 // Two sources:
 //  * ple.json  : mmap model.safetensors at the recorded offset (bf16, desktop)
 //  * --ple-table FILE : standalone table (make_ple_table.py), 32-byte header
-//    "PLETBL01" + u32 dtype(0=fp32,1=fp16,2=bf16) + u32 rows + u32 cols +
-//    f32 scale + 8 pad, then rows*cols raw values. bf16 is bit-identical to
+//    "PLETBL01" + u32 dtype(0=fp32,1=fp16,2=bf16,3=int8,4=int4) + u32 rows +
+//    u32 cols + f32 scale + 8 pad. dtype>=3: cols f32 per-column quant scales
+//    follow the header, then rows*cols int8 values (dtype 3) or rows*cols/2
+//    bytes of little-nibble-first int4 (dtype 4, signed [-8,7]).
+//    Dequant: value * colscale[c] * scale. bf16 is bit-identical to
 //    the safetensors path; fp16 loses only sub-normal-range values.
 static inline float half_to_float(uint16_t h) {
   uint32_t sign = (uint32_t)(h & 0x8000) << 16;
@@ -342,7 +345,8 @@ struct Ple {
   const uint8_t* base = nullptr;
   size_t map_len = 0; void* map_addr = nullptr;
   long rows = 0, cols = 0; float scale = 16.0f;
-  int dtype = 2;  // 0 fp32, 1 fp16, 2 bf16
+  int dtype = 2;  // 0 fp32, 1 fp16, 2 bf16, 3 int8+colscale, 4 int4+colscale
+  std::vector<float> colscale;  // per-column scale * global scale (dtype>=3)
   void map_file(const std::string& path, long off) {
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) DIE("open %s", path.c_str());
@@ -368,13 +372,22 @@ struct Ple {
     fclose(f);
     if (memcmp(hdr.magic, "PLETBL01", 8)) DIE("%s: bad magic", path.c_str());
     dtype = (int)hdr.dtype; rows = hdr.rows; cols = hdr.cols; scale = hdr.scale;
-    size_t vs = dtype == 0 ? 4 : 2;
-    map_file(path, (long)sizeof hdr);
-    if (map_len < sizeof hdr + (size_t)rows * cols * vs)
+    size_t extra = dtype >= 3 ? (size_t)cols * 4 : 0;
+    size_t data_bytes = dtype == 0 ? (size_t)rows * cols * 4
+                      : dtype <= 2 ? (size_t)rows * cols * 2
+                      : dtype == 3 ? (size_t)rows * cols
+                      : (size_t)rows * (cols / 2);
+    map_file(path, (long)(sizeof hdr + extra));
+    if (map_len < sizeof hdr + extra + data_bytes)
       DIE("%s: truncated", path.c_str());
+    if (dtype >= 3) {
+      const float* cs = (const float*)((const uint8_t*)map_addr + sizeof hdr);
+      colscale.resize(cols);
+      for (long c = 0; c < cols; ++c) colscale[c] = cs[c] * scale;
+    }
+    static const char* dn[] = {"fp32", "fp16", "bf16", "int8", "int4"};
     fprintf(stderr, "PLE table %s: dtype=%s rows=%ld cols=%ld scale=%g\n",
-            path.c_str(), dtype == 0 ? "fp32" : dtype == 1 ? "fp16" : "bf16",
-            rows, cols, scale);
+            path.c_str(), dn[dtype], rows, cols, scale);
   }
   // dst: n_tok * cols floats (cols = 35*256)
   void gather(const int32_t* toks, int n_tok, float* dst) const {
@@ -383,6 +396,18 @@ struct Ple {
       if (dtype == 0) {
         const float* row = (const float*)base + (size_t)toks[t] * cols;
         for (long c = 0; c < cols; ++c) d[c] = row[c] * scale;
+      } else if (dtype == 3) {
+        const int8_t* row = (const int8_t*)base + (size_t)toks[t] * cols;
+        for (long c = 0; c < cols; ++c) d[c] = (float)row[c] * colscale[c];
+      } else if (dtype == 4) {
+        const uint8_t* row = base + (size_t)toks[t] * (cols / 2);
+        for (long c = 0; c < cols; c += 2) {
+          uint8_t b = row[c >> 1];
+          int lo = (int)(int8_t)(uint8_t)(b << 4) >> 4;
+          int hi = (int)(int8_t)b >> 4;
+          d[c] = (float)lo * colscale[c];
+          d[c + 1] = (float)hi * colscale[c + 1];
+        }
       } else {
         const uint16_t* row = (const uint16_t*)base + (size_t)toks[t] * cols;
         if (dtype == 1) {

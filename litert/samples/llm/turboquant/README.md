@@ -175,3 +175,16 @@ python python/run_accept.py 32          # Phase 2b staging-only suite
   itself is not buildable from public sources — google-ai-edge/LiteRT-LM
   issues #3002/#2932/#2945 — so everything here builds standalone via CMake
   against the prebuilt `libLiteRt.so`).
+
+## Compact PLE table (int8, app-distributable)
+
+The bf16 PLE tensor in model.safetensors is genuinely continuous (~3100
+unique values per column) — there is no hidden integer grid, so the
+bit-identical floor is the raw bf16 bytes (4.7 GB). For distribution,
+`python/make_ple_table_intq.py ple.json ple_table_int8.bin int8` emits a
+2.19 GiB per-column symmetric int8 table (PLETBL01 dtype 3: header, then
+cols f32 per-column scales, then rows*cols int8; dequant = q * colscale[c]
+* 16.0 at gather time). Acceptance (p0 en / p1 zh teacher-forced, fused
+engine) is exactly the bf16 baseline: top-1 0.9455 / 0.9688. int4 (dtype 4,
+1.09 GiB) fails the 0.94 gate on p0 (0.9273) and is format-supported but
+not shipped.
