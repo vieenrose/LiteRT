@@ -35,7 +35,10 @@ GLOBAL_LAYERS = {4, 9, 14}
 def block_bytes(d):
     return 4 + (3 * d + 7) // 8
 
-def main(inp, outp):
+def main(inp, outp, cache_len=None):
+    global CACHE_LEN
+    if cache_len:
+        CACHE_LEN = int(cache_len)
     raw = open(inp, "rb").read()
     model = s.ModelT.InitFromObj(s.Model.GetRootAsModel(bytearray(raw), 0))
 
@@ -251,4 +254,4 @@ def main(inp, outp):
           f"(delta {delta:+d})")
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    main(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)

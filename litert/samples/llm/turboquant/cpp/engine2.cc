@@ -58,7 +58,7 @@
 
 namespace {
 
-constexpr int kCacheLen = 16384;
+int kCacheLen = 16384;   // runtime: --cache-len (4k device export uses 4096)
 constexpr int kNumLayers = 15;
 constexpr int kPrefill = 128;
 constexpr int kWindow = 512;
@@ -311,16 +311,39 @@ struct Component {
   }
 };
 
-// ---------------- PLE (mmap'd bf16 row gather) -------------------------------
+// ---------------- PLE --------------------------------------------------------
+// Two sources:
+//  * ple.json  : mmap model.safetensors at the recorded offset (bf16, desktop)
+//  * --ple-table FILE : standalone table (make_ple_table.py), 32-byte header
+//    "PLETBL01" + u32 dtype(0=fp32,1=fp16,2=bf16) + u32 rows + u32 cols +
+//    f32 scale + 8 pad, then rows*cols raw values. bf16 is bit-identical to
+//    the safetensors path; fp16 loses only sub-normal-range values.
+static inline float half_to_float(uint16_t h) {
+  uint32_t sign = (uint32_t)(h & 0x8000) << 16;
+  uint32_t exp = (h >> 10) & 0x1f;
+  uint32_t man = h & 0x3ff;
+  uint32_t bits;
+  if (exp == 0) {
+    if (man == 0) { bits = sign; }
+    else {                       // subnormal half -> normalized float
+      int sh = 0; while (!(man & 0x400)) { man <<= 1; ++sh; }
+      man &= 0x3ff;
+      bits = sign | ((127 - 15 - sh + 1) << 23) | (man << 13);
+    }
+  } else if (exp == 31) {
+    bits = sign | 0x7f800000u | (man << 13);
+  } else {
+    bits = sign | ((exp - 15 + 127) << 23) | (man << 13);
+  }
+  float f; memcpy(&f, &bits, 4); return f;
+}
+
 struct Ple {
-  const uint16_t* base = nullptr;  // bf16 rows
+  const uint8_t* base = nullptr;
   size_t map_len = 0; void* map_addr = nullptr;
   long rows = 0, cols = 0; float scale = 16.0f;
-  void init(const std::string& meta_path) {
-    std::string j = slurp(meta_path);
-    std::string path = json_str(j, "path");
-    long off = json_long(j, "offset");
-    rows = json_long(j, "rows"); cols = json_long(j, "cols");
+  int dtype = 2;  // 0 fp32, 1 fp16, 2 bf16
+  void map_file(const std::string& path, long off) {
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) DIE("open %s", path.c_str());
     struct stat st; fstat(fd, &st);
@@ -328,17 +351,49 @@ struct Ple {
     map_addr = mmap(nullptr, map_len, PROT_READ, MAP_PRIVATE, fd, 0);
     if (map_addr == MAP_FAILED) DIE("mmap %s", path.c_str());
     close(fd);
-    base = (const uint16_t*)((const uint8_t*)map_addr + off);
+    base = (const uint8_t*)map_addr + off;
+  }
+  void init(const std::string& meta_path) {
+    std::string j = slurp(meta_path);
+    long off = json_long(j, "offset");
+    rows = json_long(j, "rows"); cols = json_long(j, "cols");
+    dtype = 2;
+    map_file(json_str(j, "path"), off);
+  }
+  void init_table(const std::string& path) {
+    struct { char magic[8]; uint32_t dtype, rows, cols; float scale;
+             char pad[8]; } hdr;
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f || fread(&hdr, sizeof hdr, 1, f) != 1) DIE("read %s", path.c_str());
+    fclose(f);
+    if (memcmp(hdr.magic, "PLETBL01", 8)) DIE("%s: bad magic", path.c_str());
+    dtype = (int)hdr.dtype; rows = hdr.rows; cols = hdr.cols; scale = hdr.scale;
+    size_t vs = dtype == 0 ? 4 : 2;
+    map_file(path, (long)sizeof hdr);
+    if (map_len < sizeof hdr + (size_t)rows * cols * vs)
+      DIE("%s: truncated", path.c_str());
+    fprintf(stderr, "PLE table %s: dtype=%s rows=%ld cols=%ld scale=%g\n",
+            path.c_str(), dtype == 0 ? "fp32" : dtype == 1 ? "fp16" : "bf16",
+            rows, cols, scale);
   }
   // dst: n_tok * cols floats (cols = 35*256)
   void gather(const int32_t* toks, int n_tok, float* dst) const {
     for (int t = 0; t < n_tok; ++t) {
-      const uint16_t* row = base + (size_t)toks[t] * cols;
       float* d = dst + (size_t)t * cols;
-      for (long c = 0; c < cols; ++c) {
-        uint32_t bits = (uint32_t)row[c] << 16;
-        float v; memcpy(&v, &bits, 4);
-        d[c] = v * scale;
+      if (dtype == 0) {
+        const float* row = (const float*)base + (size_t)toks[t] * cols;
+        for (long c = 0; c < cols; ++c) d[c] = row[c] * scale;
+      } else {
+        const uint16_t* row = (const uint16_t*)base + (size_t)toks[t] * cols;
+        if (dtype == 1) {
+          for (long c = 0; c < cols; ++c) d[c] = half_to_float(row[c]) * scale;
+        } else {
+          for (long c = 0; c < cols; ++c) {
+            uint32_t bits = (uint32_t)row[c] << 16;
+            float v; memcpy(&v, &bits, 4);
+            d[c] = v * scale;
+          }
+        }
       }
     }
   }
@@ -361,6 +416,7 @@ struct Engine {
   int attn_threads = 8;   // OMP threads for the fused kernel; more
                         // collides with the XNNPACK pool (oversubscription)
   int global_memo = 0;    // 0 full fp32, 1 fp16, 2 stream (see tq3_attn.h)
+  std::string ple_table;  // optional standalone PLE table (--ple-table)
   void init(const std::string& model_path, const std::string& final_dir,
             const std::string& assets, int threads,
             const std::string& weight_cache, bool tq_mode) {
@@ -387,7 +443,8 @@ struct Engine {
                           /*alias_kv=*/true, &ext_inputs, attn);
     aux = new Component(env, final_dir + "/auxiliary.tflite", threads, "", false);
     emb = new Component(env, final_dir + "/embedder_quantized.tflite", threads, "", false);
-    ple.init(assets + "/ple.json");
+    if (!ple_table.empty()) ple.init_table(ple_table);
+    else ple.init(assets + "/ple.json");
     fused = model->sig("decode").in_idx("packed_k_0") >= 0;
     if (fused && !use_tq) DIE("fused model has no baseline mode");
     fprintf(stderr, "model %s: %s mode\n", model_path.c_str(),
@@ -609,7 +666,7 @@ struct Engine {
 
 int main(int argc, char** argv) {
   std::string final_dir, assets, prompt_file, out_file = "engine_out.json",
-              weight_cache, model_path, dump_logits;
+              weight_cache, model_path, dump_logits, ple_table;
   int threads = 32, steps = 64, max_new = 256, attn_threads = 8;
   int global_memo = 0;
   bool tq_mode = true, teacher_force = false, free_run = false, window_check = false;
@@ -637,6 +694,8 @@ int main(int argc, char** argv) {
     else if (a == "--free") free_run = true;
     else if (a == "--window-check") window_check = true;
     else if (a == "--weight-cache") weight_cache = next();
+    else if (a == "--ple-table") ple_table = next();
+    else if (a == "--cache-len") kCacheLen = atoi(next().c_str());
     else DIE("unknown arg %s", a.c_str());
   }
   if (final_dir.empty() || assets.empty() || prompt_file.empty())
@@ -656,6 +715,7 @@ int main(int argc, char** argv) {
   double t0 = now_s();
   eng.attn_threads = attn_threads;
   eng.global_memo = global_memo;
+  eng.ple_table = ple_table;
   eng.init(model_path, final_dir, assets, threads, weight_cache, tq_mode);
   rss_mb(&rss, &hwm);
   fprintf(stderr, "loaded in %.1fs rss=%ld MB hwm=%ld MB packed_side_cache=%.1f MB\n",

@@ -30,7 +30,6 @@
 #include "litert/c/litert_tensor_buffer_types.h"
 
 namespace {
-constexpr int kCacheLen = 16384;
 constexpr int kHeads = 8;
 constexpr float kMaskedBelow = -50.0f;  // mask values are {0, -100}
 constexpr int kTileRows = 1024;         // stream-mode tile (2 MiB at d=512)
@@ -300,16 +299,26 @@ LiteRtStatus AttnRun(void *user_data, size_t num_inputs,
   const uint8_t *pv = (const uint8_t *)p[5];
   float *ctx_out = (float *)po;
 
-  const size_t bb = nb[4] / kCacheLen;             // 100 (d=256) or 196 (d=512)
-  const int d = bb == 100 ? 256 : 512;
-  const tq3_ctx *tq = d == 256 ? core->tq256 : core->tq512;
+  // Infer T (tokens) and C (cache length) jointly from the mask and packed
+  // sizes: mask holds T*(C+T) floats, packed holds C blocks of 100 (d=256)
+  // or 196 (d=512) bytes. Works for any cache_length export (16k, 4k, ...).
   const size_t mask_f = nb[3] / 4;
   int T = -1;
-  for (int cand : {1, 128})
-    if ((size_t)cand * (kCacheLen + cand) == mask_f) T = cand;
+  int C = 0;
+  size_t bb = 0;
+  for (int cand : {1, 128}) {
+    if (mask_f % cand) continue;
+    long c = (long)(mask_f / cand) - cand;
+    if (c <= 0 || nb[4] % (size_t)c) continue;
+    size_t b = nb[4] / (size_t)c;
+    if (b != 100 && b != 196) continue;
+    T = cand; C = (int)c; bb = b;
+    break;
+  }
+  const int d = bb == 100 ? 256 : 512;
+  const tq3_ctx *tq = d == 256 ? core->tq256 : core->tq512;
   if (T < 0 || nb[0] != (size_t)kHeads * T * d * 4 || ob != nb[0])
     return kLiteRtStatusErrorInvalidArgument;
-  const int C = kCacheLen;
   const int W = C + T;  // mask row width
 
   // live cache range = union over tokens of unmasked cache columns
