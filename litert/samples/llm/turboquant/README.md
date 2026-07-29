@@ -145,11 +145,25 @@ python python/run_accept.py 32          # Phase 2b staging-only suite
 
 ## Known limitations
 
-- **Global-layer memo growth**: sliding pairs are window-capped (~14 MiB
-  total) but the 3 global pairs grow with position — at full 16k context the
-  memo would reach ~215 MiB (still 3× under the staging floor). If that
-  matters, stream global layers row-wise or hold the memo in fp16 (kernel-only
-  change).
+- ~~Global-layer memo growth~~ **mitigated** via `--global-memo full|fp16|stream`
+  (sliding pairs are always window-capped, ~14 MiB total; the flag governs the
+  3 global pairs whose live rows grow with position):
+
+  | mode | p0 top-1 | p1 top-1 | decode tok/s (p0 / p2@1244) | memo resident @1244 | projected resident @16k |
+  |---|---|---|---|---|---|
+  | `full` (x86 default) | 0.9455 | 0.9688 | 14.2 / 10.5 | 37 MiB | ~215 MiB |
+  | `fp16` | 0.9636 | 0.9844 | 13.6 / 7.8 | 24.5 MiB | ~114 MiB |
+  | `stream` (device default) | 0.9455 | 0.9688 | 13.3 / 9.9 | 12 MiB | **~14 MiB + O(1) scratch** |
+
+  `stream` keeps NO persistent global-layer memo: decode runs two tile-streamed
+  passes (2 MiB tile + 1 MiB score rows, O(1) in context) with per-(row,column)
+  operation order identical to `full` — logits are **bit-identical**
+  (verified max|Δ| = 0.0 over 64 teacher-forced steps) at a measured −6%
+  decode cost. Prefill in `stream` mode uses a transient dequant buffer freed
+  per op (5 MiB at ctx 1244; up to 64 MiB for one op at a full-16k chunk,
+  resident zero). `fp16` (memo stored as `_Float16`) is dominated: more memory
+  than `stream` AND slower (the fp16→fp32 conversion sits in the hot dot loop),
+  though its top-1 stays above the 0.94 gate. Pick `stream` on device.
 - **`per_layer_embedder.tflite` re-export pending** — the exported one is
   corrupt; the engines mmap the PLE table from the HF safetensors instead
   (desktop convenience; on-device you'd precompute the table).

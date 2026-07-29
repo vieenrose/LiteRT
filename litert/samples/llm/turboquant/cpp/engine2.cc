@@ -360,6 +360,7 @@ struct Engine {
 
   int attn_threads = 8;   // OMP threads for the fused kernel; more
                         // collides with the XNNPACK pool (oversubscription)
+  int global_memo = 0;    // 0 full fp32, 1 fp16, 2 stream (see tq3_attn.h)
   void init(const std::string& model_path, const std::string& final_dir,
             const std::string& assets, int threads,
             const std::string& weight_cache, bool tq_mode) {
@@ -381,7 +382,7 @@ struct Engine {
           ext_inputs[std::string("packed_") + (role ? "v" : "k") + "_" +
                      std::to_string(l)] = {pdata(l, role), (size_t)kCacheLen * bb};
       }
-    attn = tq3_attn_create(&tq256, &tq512, attn_threads);
+    attn = tq3_attn_create(&tq256, &tq512, attn_threads, global_memo);
     model = new Component(env, model_path, threads, weight_cache,
                           /*alias_kv=*/true, &ext_inputs, attn);
     aux = new Component(env, final_dir + "/auxiliary.tflite", threads, "", false);
@@ -610,6 +611,7 @@ int main(int argc, char** argv) {
   std::string final_dir, assets, prompt_file, out_file = "engine_out.json",
               weight_cache, model_path, dump_logits;
   int threads = 32, steps = 64, max_new = 256, attn_threads = 8;
+  int global_memo = 0;
   bool tq_mode = true, teacher_force = false, free_run = false, window_check = false;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -622,6 +624,12 @@ int main(int argc, char** argv) {
     else if (a == "--out") out_file = next();
     else if (a == "--threads") threads = atoi(next().c_str());
     else if (a == "--attn-threads") attn_threads = atoi(next().c_str());
+    else if (a == "--global-memo") {
+      std::string v = next();
+      global_memo = v == "fp16" ? 1 : v == "stream" ? 2 : 0;
+      if (v != "full" && v != "fp16" && v != "stream")
+        DIE("--global-memo full|fp16|stream");
+    }
     else if (a == "--steps") steps = atoi(next().c_str());
     else if (a == "--max-new") max_new = atoi(next().c_str());
     else if (a == "--mode") tq_mode = next() == "tq";
@@ -647,6 +655,7 @@ int main(int argc, char** argv) {
   Engine eng;
   double t0 = now_s();
   eng.attn_threads = attn_threads;
+  eng.global_memo = global_memo;
   eng.init(model_path, final_dir, assets, threads, weight_cache, tq_mode);
   rss_mb(&rss, &hwm);
   fprintf(stderr, "loaded in %.1fs rss=%ld MB hwm=%ld MB packed_side_cache=%.1f MB\n",
