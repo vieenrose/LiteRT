@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cerrno>
 #include <cstring>
 #include <chrono>
 #include <map>
@@ -341,21 +342,135 @@ static inline float half_to_float(uint16_t h) {
   float f; memcpy(&f, &bits, 4); return f;
 }
 
+
+// ---- page-cache footprint control ------------------------------------------
+// Apply |advice| to every mapping whose backing path contains |needle|.
+// LiteRT/XNNPACK own the model and weight-cache mmaps, so /proc/self/maps is
+// the only handle we have on them.
+static size_t madvise_mapped_file(const char* needle, int advice) {
+  FILE* f = fopen("/proc/self/maps", "r");
+  if (!f) return 0;
+  char line[512]; size_t total = 0;
+  while (fgets(line, sizeof line, f)) {
+    if (!strstr(line, needle)) continue;
+    unsigned long lo = 0, hi = 0;
+    if (sscanf(line, "%lx-%lx", &lo, &hi) != 2 || hi <= lo) continue;
+    if (madvise((void*)lo, hi - lo, advice) == 0) total += hi - lo;
+  }
+  fclose(f);
+  return total;
+}
+
+// Periodically drop the weight pages already streamed through.  The weight set
+// is read in full every token and dwarfs the reclaimable RAM of a small device,
+// so those pages have no reuse value -- but they keep counting toward RSS,
+// which is what Android's lowmemorykiller ranks victims by.  Clean file pages:
+// dropping is always safe and costs only a refault we would have taken anyway.
+static void trim_file_cache() {
+  madvise_mapped_file(".tflite", MADV_DONTNEED);
+  madvise_mapped_file("wcache", MADV_DONTNEED);
+}
+
+// One-shot: after the graph is built and (with a warm XNNPACK weight cache)
+// the repacked weights are being served from wcache, the pages faulted in from
+// the .tflite during construction are dead weight that still counts toward RSS
+// -- and RSS is what Android's lowmemorykiller ranks victims by.  Measured on a
+// Boox Tab Mini C (Gemma 4 E2B): this returns 2196 MB.  Clean MAP_PRIVATE file
+// pages, so dropping is always safe; anything still needed simply refaults.
+// TQ3_DROP_MODEL_CACHE=0 disables.
+static void drop_model_page_cache() {
+  const char* e = getenv("TQ3_DROP_MODEL_CACHE");
+  if (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N')) return;
+  size_t n = madvise_mapped_file(".tflite", MADV_DONTNEED);
+  fprintf(stderr, "dropped %.0f MB of .tflite page cache from RSS\n",
+          n / 1048576.0);
+}
+
+// Whole-process resident split from smaps_rollup, in kB.
+static void rollup_kb(long* rss, long* anon) {
+  *rss = *anon = 0;
+  FILE* f = fopen("/proc/self/smaps_rollup", "r");
+  if (!f) return;
+  char line[256]; long v;
+  while (fgets(line, sizeof line, f)) {
+    if (sscanf(line, "Rss: %ld", &v) == 1) *rss = v;
+    else if (sscanf(line, "Anonymous: %ld", &v) == 1) *anon = v;
+  }
+  fclose(f);
+}
+
+static int g_trim_every = -1;
+static int g_since_trim = 0;
+static long g_peak_file_kb = 0, g_peak_rss_kb = 0;
+static void maybe_trim() {
+  if (g_trim_every < 0) {
+    const char* e = getenv("TQ3_TRIM_EVERY");
+    g_trim_every = e ? atoi(e) : 0;
+  }
+  long rss, anon; rollup_kb(&rss, &anon);
+  if (rss > g_peak_rss_kb) g_peak_rss_kb = rss;
+  if (rss - anon > g_peak_file_kb) g_peak_file_kb = rss - anon;
+  if (g_trim_every > 0 && ++g_since_trim >= g_trim_every) {
+    g_since_trim = 0;
+    trim_file_cache();
+  }
+}
+
 struct Ple {
   const uint8_t* base = nullptr;
   size_t map_len = 0; void* map_addr = nullptr;
   long rows = 0, cols = 0; float scale = 16.0f;
   int dtype = 2;  // 0 fp32, 1 fp16, 2 bf16, 3 int8+colscale, 4 int4+colscale
   std::vector<float> colscale;  // per-column scale * global scale (dtype>=3)
+  // I/O strategy for the row gather.  A gather touches one ~8.75 KB row per
+  // token at a uniformly random offset in a multi-GiB table.  Under mmap the
+  // kernel's default readahead pulls 128 KB+ per fault and every page stays
+  // resident, so the mapping's RSS grows toward the whole table for no reuse
+  // benefit -- fatal on memory-tight devices, where it makes the process the
+  // fattest lowmemorykiller target.  pread() copies just the row into a
+  // reusable buffer and never grows RSS.  TQ3_PLE_IO_PREAD=0 restores mmap.
+  bool use_pread = true;
+  int fd = -1; size_t row_bytes = 0; off_t data_off = 0;
+  mutable std::vector<uint8_t> rowbuf;
+  ~Ple() { if (map_addr) munmap(map_addr, map_len); if (fd >= 0) close(fd); }
   void map_file(const std::string& path, long off) {
-    int fd = open(path.c_str(), O_RDONLY);
+    fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) DIE("open %s", path.c_str());
     struct stat st; fstat(fd, &st);
     map_len = st.st_size;
+    data_off = (off_t)off;
+    const char* e = getenv("TQ3_PLE_IO_PREAD");
+    use_pread = !(e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N'));
+    if (use_pread) return;  // no mapping at all in pread mode
     map_addr = mmap(nullptr, map_len, PROT_READ, MAP_PRIVATE, fd, 0);
     if (map_addr == MAP_FAILED) DIE("mmap %s", path.c_str());
-    close(fd);
+    // Random row gather: suppress readahead, which otherwise inflates this
+    // mapping's resident set by ~15x for no benefit.
+    madvise(map_addr, map_len, MADV_RANDOM);
     base = (const uint8_t*)map_addr + off;
+  }
+  // Raw bytes of row |tok|.  Under mmap this points into the mapping; under
+  // pread into the reusable buffer, valid until the next call.  Identical
+  // bytes either way.
+  const uint8_t* row_ptr(int32_t tok) const {
+    size_t r = (size_t)(tok < 0 ? 0 : (tok >= rows ? rows - 1 : tok));
+    if (!use_pread) return base + r * row_bytes;
+    off_t off = data_off + (off_t)r * (off_t)row_bytes;
+    size_t got = 0;
+    while (got < row_bytes) {
+      ssize_t n = pread(fd, rowbuf.data() + got, row_bytes - got,
+                        off + (off_t)got);
+      if (n > 0) got += (size_t)n;
+      else if (n < 0 && errno == EINTR) continue;
+      else { memset(rowbuf.data() + got, 0, row_bytes - got); break; }
+    }
+    return rowbuf.data();
+  }
+  void set_row_bytes() {
+    row_bytes = dtype == 0 ? (size_t)cols * 4
+              : dtype <= 2 ? (size_t)cols * 2
+              : dtype == 3 ? (size_t)cols : (size_t)cols / 2;
+    rowbuf.resize(row_bytes);
   }
   void init(const std::string& meta_path) {
     std::string j = slurp(meta_path);
@@ -363,6 +478,7 @@ struct Ple {
     rows = json_long(j, "rows"); cols = json_long(j, "cols");
     dtype = 2;
     map_file(json_str(j, "path"), off);
+    set_row_bytes();
   }
   void init_table(const std::string& path) {
     struct { char magic[8]; uint32_t dtype, rows, cols; float scale;
@@ -378,10 +494,14 @@ struct Ple {
                       : dtype == 3 ? (size_t)rows * cols
                       : (size_t)rows * (cols / 2);
     map_file(path, (long)(sizeof hdr + extra));
+    set_row_bytes();
     if (map_len < sizeof hdr + extra + data_bytes)
       DIE("%s: truncated", path.c_str());
     if (dtype >= 3) {
-      const float* cs = (const float*)((const uint8_t*)map_addr + sizeof hdr);
+      std::vector<float> cs(cols);
+      if (pread(fd, cs.data(), (size_t)cols * 4, sizeof hdr) !=
+          (ssize_t)((size_t)cols * 4))
+        DIE("%s: colscale read", path.c_str());
       colscale.resize(cols);
       for (long c = 0; c < cols; ++c) colscale[c] = cs[c] * scale;
     }
@@ -393,14 +513,15 @@ struct Ple {
   void gather(const int32_t* toks, int n_tok, float* dst) const {
     for (int t = 0; t < n_tok; ++t) {
       float* d = dst + (size_t)t * cols;
+      const uint8_t* raw = row_ptr(toks[t]);
       if (dtype == 0) {
-        const float* row = (const float*)base + (size_t)toks[t] * cols;
+        const float* row = (const float*)raw;
         for (long c = 0; c < cols; ++c) d[c] = row[c] * scale;
       } else if (dtype == 3) {
-        const int8_t* row = (const int8_t*)base + (size_t)toks[t] * cols;
+        const int8_t* row = (const int8_t*)raw;
         for (long c = 0; c < cols; ++c) d[c] = (float)row[c] * colscale[c];
       } else if (dtype == 4) {
-        const uint8_t* row = base + (size_t)toks[t] * (cols / 2);
+        const uint8_t* row = raw;
         for (long c = 0; c < cols; c += 2) {
           uint8_t b = row[c >> 1];
           int lo = (int)(int8_t)(uint8_t)(b << 4) >> 4;
@@ -409,7 +530,7 @@ struct Ple {
           d[c + 1] = (float)hi * colscale[c + 1];
         }
       } else {
-        const uint16_t* row = (const uint16_t*)base + (size_t)toks[t] * cols;
+        const uint16_t* row = (const uint16_t*)raw;
         if (dtype == 1) {
           for (long c = 0; c < cols; ++c) d[c] = half_to_float(row[c]) * scale;
         } else {
@@ -742,6 +863,7 @@ int main(int argc, char** argv) {
   eng.global_memo = global_memo;
   eng.ple_table = ple_table;
   eng.init(model_path, final_dir, assets, threads, weight_cache, tq_mode);
+  drop_model_page_cache();
   rss_mb(&rss, &hwm);
   fprintf(stderr, "loaded in %.1fs rss=%ld MB hwm=%ld MB packed_side_cache=%.1f MB\n",
           now_s() - t0, rss, hwm, eng.packed_bytes() / 1048576.0);
@@ -753,6 +875,7 @@ int main(int argc, char** argv) {
   double tp0 = now_s();
   for (int c = 0; c < m; c += kPrefill) {
     eng.prefill(ids.data() + c, c);
+    maybe_trim();
     fprintf(stderr, "prefill @%d\n", c);
   }
   double prefill_s = now_s() - tp0;
@@ -769,6 +892,7 @@ int main(int argc, char** argv) {
   int cur = -1;
   for (int i = m; i < n; ++i) {
     cur = eng.decode(ids[i], i, true, dumpc ? cl.data() : nullptr);
+    maybe_trim();
     if (dumpc) fwrite(cl.data(), 4, cl.size(), dumpc);
   }
   if (dumpc) fclose(dumpc);
@@ -827,6 +951,7 @@ int main(int argc, char** argv) {
     for (int e : eos) if (feed == e) stop = true;
     if (stop) break;
     cur = eng.decode(feed, pos, true, dumpf ? logits_buf.data() : nullptr);
+    maybe_trim();
     if (dumpf) fwrite(logits_buf.data(), 4, logits_buf.size(), dumpf);
     ++pos;
   }
@@ -849,6 +974,8 @@ int main(int argc, char** argv) {
           compared ? (double)agree / compared : -1, diverge, compared);
   fprintf(f, " \"prefill_s\": %.3f, \"prefill_tok_s\": %.2f, \"catchup_tok_s\": %.3f,\n",
           prefill_s, m / (prefill_s + 1e-9), catchup_toks / (catchup_s + 1e-9));
+  fprintf(f, " \"peak_rss_kb\": %ld, \"peak_file_kb\": %ld, \"trim_every\": %d,\n",
+          g_peak_rss_kb, g_peak_file_kb, g_trim_every);
   fprintf(f, " \"decode_s\": %.3f, \"decode_tok_s\": %.3f, \"n_gen\": %zu,\n",
           gen_s, (gen.size() - 1) / (gen_s + 1e-9), gen.size());
   fprintf(f, " \"t_model\": %.2f, \"t_quant\": %.3f, \"t_dequant\": %.3f, \"t_glue\": %.2f,\n",
