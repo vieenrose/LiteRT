@@ -3,7 +3,7 @@
 // Global-layer memo modes (sliding layers always use the window-capped fp32
 // memo, <= 14 MiB total):
 //   full   - fp32 memo, grows with position (~215 MiB at 16k). x86 default.
-//   fp16   - memo stored as _Float16, converted on read (~100 MiB at 16k).
+//   fp16   - memo stored as tq3_f16, converted on read (~100 MiB at 16k).
 //   stream - no persistent memo for global layers. Decode: two-pass tile
 //            streaming (O(1) ~4 MiB scratch), operation order identical to
 //            `full` per (row, column) -> bit-identical logits. Prefill: a
@@ -30,6 +30,11 @@
 #include "litert/c/litert_tensor_buffer_types.h"
 
 namespace {
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 13)
+typedef _Float16 tq3_f16;
+#else
+typedef float tq3_f16;  // GCC without _Float16 (e.g. aarch64 at plain armv8-a)
+#endif
 constexpr int kHeads = 8;
 constexpr float kMaskedBelow = -50.0f;  // mask values are {0, -100}
 constexpr int kTileRows = 1024;         // stream-mode tile (2 MiB at d=512)
@@ -50,7 +55,7 @@ struct tq3_attn_core {
     uint64_t gen = ~0ull;
     int lo = 0, hi = 0, d = 0;
     std::vector<float> k, v;        // fp32 memo
-    std::vector<_Float16> kh, vh;   // fp16 memo (global layers, mode fp16)
+    std::vector<tq3_f16> kh, vh;   // fp16 memo (global layers, mode fp16)
   };
   std::map<const void *, Memo> memo;  // keyed by packed_k base pointer
   std::mutex mu;
@@ -79,7 +84,7 @@ size_t tq3_attn_memo_bytes(const tq3_attn_core *c) {
   size_t n = 0;
   for (auto &kv : c->memo)
     n += (kv.second.k.capacity() + kv.second.v.capacity()) * sizeof(float) +
-         (kv.second.kh.capacity() + kv.second.vh.capacity()) * sizeof(_Float16);
+         (kv.second.kh.capacity() + kv.second.vh.capacity()) * sizeof(tq3_f16);
   return n;
 }
 double tq3_attn_dequant_seconds(const tq3_attn_core *c) { return c->t_dequant; }
@@ -347,7 +352,7 @@ LiteRtStatus AttnRun(void *user_data, size_t num_inputs,
                        nt, ctx_out, &core->t_dequant);
   } else {
     const float *K = nullptr, *V = nullptr;
-    const _Float16 *K16 = nullptr, *V16 = nullptr;
+    const tq3_f16 *K16 = nullptr, *V16 = nullptr;
     std::vector<float> tk, tv;  // stream-mode prefill: transient, freed on exit
     if (gmode == 2) {
       const double td0 = now_s();
@@ -379,8 +384,8 @@ LiteRtStatus AttnRun(void *user_data, size_t num_inputs,
             tq3_dequantize(tq, pk + (size_t)(lo + j) * bb, rk);
             tq3_dequantize(tq, pv + (size_t)(lo + j) * bb, rv);
             for (int x = 0; x < d; ++x) {
-              mm->kh[(size_t)j * d + x] = (_Float16)rk[x];
-              mm->vh[(size_t)j * d + x] = (_Float16)rv[x];
+              mm->kh[(size_t)j * d + x] = (tq3_f16)rk[x];
+              mm->vh[(size_t)j * d + x] = (tq3_f16)rv[x];
             }
           }
         } else {
