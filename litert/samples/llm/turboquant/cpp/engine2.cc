@@ -69,6 +69,17 @@ int kGlobalDim = 512;    // --global-dim (G3-1B head_dim is 256 everywhere)
 bool is_global_layer(int l) { return (l + 1) % kGlobalEvery == 0; }
 int layer_dim(int l) { return is_global_layer(l) ? kGlobalDim : 256; }
 
+// Windowed side-cache: a sliding-window layer can never attend outside its last
+// kWindow positions, so its ring buffer only needs kWindow rows (absolute
+// column c lives at c % kWindow).  Global layers keep the full cache length --
+// windowing those WOULD lose information.  --window-kv 0 disables (full length
+// everywhere, the original layout).
+bool kWindowKv = false;
+int layer_rows(int l) {
+  return (kWindowKv && !is_global_layer(l) && kWindow < kCacheLen) ? kWindow
+                                                                  : kCacheLen;
+}
+
 double now_s() {
   using namespace std::chrono;
   return duration_cast<duration<double>>(steady_clock::now().time_since_epoch()).count();
@@ -565,6 +576,7 @@ struct Engine {
   int attn_threads = 8;   // OMP threads for the fused kernel; more
                         // collides with the XNNPACK pool (oversubscription)
   int global_memo = 0;    // 0 full fp32, 1 fp16, 2 stream (see tq3_attn.h)
+  int kv_bits = 3;       // --kv-bits (3 = TQ3, 4 = TQ4)
   bool has_ple = true;
   std::string ple_table;  // optional standalone PLE table (--ple-table)
   void init(const std::string& model_path, const std::string& final_dir,
@@ -572,22 +584,43 @@ struct Engine {
             const std::string& weight_cache, bool tq_mode) {
     use_tq = tq_mode;
     ENSURE(LiteRtCreateEnvironment(0, nullptr, &env));
-    if (tq3_init(&tq256, 256, (assets + "/rot_d256.bin").c_str(),
-                 (assets + "/cb_d256_b3.bin").c_str()))
-      DIE("tq3_init d=256");
-    if (tq3_init(&tq512, 512, (assets + "/rot_d512.bin").c_str(),
-                 (assets + "/cb_d512_b3.bin").c_str()))
-      DIE("tq3_init d=512");
-    if (use_tq)
+    if (kv_bits == 16) {              // exact fp16: no rotation, no codebook
+      if (tq3_init(&tq256, 256, 16, nullptr, nullptr) ||
+          tq3_init(&tq512, 512, 16, nullptr, nullptr))
+        DIE("tq3_init fp16");
+      fprintf(stderr, "KV codec: EXACT fp16, block %zu B at d=256\n",
+              tq256.block_bytes);
+    } else {
+      char cb[512];
+      snprintf(cb, sizeof cb, "%s/cb_d256_b%d.bin", assets.c_str(), kv_bits);
+      if (tq3_init(&tq256, 256, kv_bits, (assets + "/rot_d256.bin").c_str(), cb))
+        DIE("tq3_init d=256 bits=%d (%s)", kv_bits, cb);
+      snprintf(cb, sizeof cb, "%s/cb_d512_b%d.bin", assets.c_str(), kv_bits);
+      if (tq3_init(&tq512, 512, kv_bits, (assets + "/rot_d512.bin").c_str(), cb))
+        DIE("tq3_init d=512 bits=%d (%s)", kv_bits, cb);
+      fprintf(stderr, "KV codec: %d-bit TurboQuant, block %zu B at d=256\n",
+              kv_bits, tq256.block_bytes);
+    }
+    if (use_tq) {
+      size_t kv_total = 0;
       for (int l = 0; l < kNumLayers; ++l) {
         size_t bb = (layer_dim(l) == 512 ? tq512 : tq256).block_bytes;
+        const size_t rows = (size_t)layer_rows(l);
         // +64: LiteRT host-memory buffers require 64-byte alignment
-        packed[l][0].assign((size_t)kCacheLen * bb + 64, 0);
-        packed[l][1].assign((size_t)kCacheLen * bb + 64, 0);
+        packed[l][0].assign(rows * bb + 64, 0);
+        packed[l][1].assign(rows * bb + 64, 0);
+        kv_total += 2 * rows * bb;
         for (int role = 0; role < 2; ++role)
           ext_inputs[std::string("packed_") + (role ? "v" : "k") + "_" +
-                     std::to_string(l)] = {pdata(l, role), (size_t)kCacheLen * bb};
+                     std::to_string(l)] = {pdata(l, role), rows * bb};
       }
+      fprintf(stderr,
+              "KV side-cache: %.1f MB (%d layers, window-kv %s, %d sliding at "
+              "%d rows / %d global at %d rows)\n",
+              kv_total / 1048576.0, kNumLayers, kWindowKv ? "on" : "off",
+              kNumLayers - kNumLayers / kGlobalEvery, layer_rows(0),
+              kNumLayers / kGlobalEvery, kCacheLen);
+    }
     attn = tq3_attn_create(&tq256, &tq512, attn_threads, global_memo);
     model = new Component(env, model_path, threads, weight_cache,
                           /*alias_kv=*/true, &ext_inputs, attn);
@@ -647,7 +680,9 @@ struct Engine {
         }
         const float* w = vec;
         if (use_tq) {
-          uint8_t* blk = pdata(layer, role == 'v') + (size_t)pos * q->block_bytes;
+          const int rws = layer_rows(layer);
+          uint8_t* blk = pdata(layer, role == 'v') +
+                         (size_t)(pos % rws) * q->block_bytes;
           double t0 = now_s();
           tq3_quantize(q, vec, blk, scr);   // quantize-on-write; packed = truth
           t_quant += now_s() - t0;
@@ -688,7 +723,9 @@ struct Engine {
       std::string nm = std::string("kv_cache_") + (role ? "v" : "k") + "_" + std::to_string(layer);
       const float* stg = (const float*)Component::lock_r(model->alias_.at(nm));
       for (int pos = lo; pos < hi; ++pos) {
-        tq3_dequantize(q, pdata(layer, role) + (size_t)pos * q->block_bytes, deq);
+        tq3_dequantize(q, pdata(layer, role) +
+                              (size_t)(pos % layer_rows(layer)) * q->block_bytes,
+                       deq);
         for (int j = 0; j < d; ++j) {
           float sv = role ? stg[(size_t)j * kCacheLen + pos] : stg[(size_t)pos * d + j];
           float diff = fabsf(sv - deq[j]);
@@ -825,6 +862,8 @@ int main(int argc, char** argv) {
   std::string final_dir, assets, prompt_file, out_file = "engine_out.json",
               weight_cache, model_path, dump_logits, ple_table;
   int threads = 32, steps = 64, max_new = 256, attn_threads = 8;
+  int kv_bits = 3;
+  bool window_kv = false;
   int global_memo = 0;
   bool tq_mode = true, teacher_force = false, free_run = false, window_check = false;
   for (int i = 1; i < argc; ++i) {
@@ -853,6 +892,8 @@ int main(int argc, char** argv) {
     else if (a == "--weight-cache") weight_cache = next();
     else if (a == "--ple-table") ple_table = next();
     else if (a == "--cache-len") kCacheLen = atoi(next().c_str());
+    else if (a == "--kv-bits") kv_bits = atoi(next().c_str());
+    else if (a == "--window-kv") window_kv = atoi(next().c_str()) != 0;
     else if (a == "--layers") kNumLayers = atoi(next().c_str());
     else if (a == "--window") kWindow = atoi(next().c_str());
     else if (a == "--global-every") kGlobalEvery = atoi(next().c_str());
@@ -877,6 +918,8 @@ int main(int argc, char** argv) {
   eng.attn_threads = attn_threads;
   eng.global_memo = global_memo;
   eng.ple_table = ple_table;
+  eng.kv_bits = kv_bits;
+  kWindowKv = window_kv;
   eng.init(model_path, final_dir, assets, threads, weight_cache, tq_mode);
   drop_model_page_cache();
   rss_mb(&rss, &hwm);

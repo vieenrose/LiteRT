@@ -175,14 +175,24 @@ void attn_row(const float *qv, const float *mr, int lo, int live, int C, int T,
   for (int x = 0; x < d; ++x) o[x] = (float)acc[x];
 }
 
+// Ring mapping for windowed side-caches.  Sliding-window layers only ever need
+// the last |rows| positions, so their buffer holds |rows| rows and absolute
+// cache column c lives at c % rows.  Global layers are allocated at full cache
+// length (rows == C), where c % rows == c and this is the identity -- windowing
+// a global layer would be genuinely lossy and must never happen.
+static inline const uint8_t *blk(const uint8_t *base, long c, size_t bb,
+                                 long rows) {
+  return base + (size_t)(rows ? (c % rows) : c) * bb;
+}
+
 // stream-mode decode (T==1, global layers): two passes over row tiles, no
 // materialized K/V beyond one tile. Per-(r,j) operation order matches the
 // memo path exactly -> bit-identical output.
 void attn_stream_decode(const tq3_ctx *tq, const uint8_t *pk, const uint8_t *pv,
                         size_t bb, const float *q, const float *mask,
                         const float *k_new, const float *v_new, int lo,
-                        int live, int C, int d, int nt, float *ctx_out,
-                        double *t_dequant) {
+                        int live, int C, int d, int nt, long rows,
+                        float *ctx_out, double *t_dequant) {
   // T == 1 so the direct/transposed slice layouts coincide ((1,d) vs (d,1)).
   std::vector<float> tile((size_t)kTileRows * d);
   std::vector<double> srow((size_t)kHeads * (live + 1));
@@ -195,7 +205,7 @@ void attn_stream_decode(const tq3_ctx *tq, const uint8_t *pk, const uint8_t *pv,
     const double td0 = now_s();
 #pragma omp parallel for schedule(static) num_threads(nt)
     for (int j = 0; j < n; ++j)
-      tq3_dequantize(tq, pk + (size_t)(lo + t0 + j) * bb,
+      tq3_dequantize(tq, blk(pk, lo + t0 + j, bb, rows),
                      tile.data() + (size_t)j * d);
     *t_dequant += now_s() - td0;
 #pragma omp parallel for schedule(static) num_threads(nt)
@@ -246,7 +256,7 @@ void attn_stream_decode(const tq3_ctx *tq, const uint8_t *pk, const uint8_t *pv,
     const double td0 = now_s();
 #pragma omp parallel for schedule(static) num_threads(nt)
     for (int j = 0; j < n; ++j)
-      tq3_dequantize(tq, pv + (size_t)(lo + t0 + j) * bb,
+      tq3_dequantize(tq, blk(pv, lo + t0 + j, bb, rows),
                      tile.data() + (size_t)j * d);
     *t_dequant += now_s() - td0;
 #pragma omp parallel for schedule(static) num_threads(nt)
@@ -307,24 +317,36 @@ LiteRtStatus AttnRun(void *user_data, size_t num_inputs,
   // Infer T (tokens) and C (cache length) jointly from the mask and packed
   // sizes: mask holds T*(C+T) floats, packed holds C blocks of 100 (d=256)
   // or 196 (d=512) bytes. Works for any cache_length export (16k, 4k, ...).
+  // Pick the codec by block size (TQ3 d=256 -> 100 B, TQ4 -> 132 B, fp16 ->
+  // 512 B; d=512 -> 196 / 260 / 1024).  The packed buffer may be SHORTER than
+  // the cache length for windowed sliding layers, so the block size -- not the
+  // buffer length -- is what identifies the codec.
   const size_t mask_f = nb[3] / 4;
+  size_t bb = 0;
+  const tq3_ctx *tq = nullptr;
+  for (const tq3_ctx *c2 : {core->tq256, core->tq512}) {
+    if (!c2 || !c2->block_bytes) continue;
+    if (nb[4] % c2->block_bytes) continue;
+    tq = c2; bb = c2->block_bytes; break;
+  }
+  if (!tq) return kLiteRtStatusErrorInvalidArgument;
+  const int d = tq->d;
+  const long rows = (long)(nb[4] / bb);   // ring length of THIS layer's buffer
+
+  // T (1 decode / 128 prefill) and C (cache length) from the mask, cross-checked
+  // against the q tensor: mask holds T*(C+T) floats and q is (1,H,T,d) fp32.
   int T = -1;
   int C = 0;
-  size_t bb = 0;
   for (int cand : {1, 128}) {
     if (mask_f % cand) continue;
     long c = (long)(mask_f / cand) - cand;
-    if (c <= 0 || nb[4] % (size_t)c) continue;
-    size_t b = nb[4] / (size_t)c;
-    if (b != 100 && b != 196) continue;
-    T = cand; C = (int)c; bb = b;
+    if (c <= 0 || rows > c) continue;
+    const size_t denom = (size_t)cand * d * 4;
+    if (!denom || nb[0] % denom) continue;
+    size_t h = nb[0] / denom;
+    if (h < 1 || h > 64) continue;
+    T = cand; C = (int)c; kHeads = (int)h;
     break;
-  }
-  const int d = bb == 100 ? 256 : 512;
-  const tq3_ctx *tq = d == 256 ? core->tq256 : core->tq512;
-  if (T > 0 && d > 0) {                 // q is (1,H,T,d) fp32; H varies by model
-    size_t h = nb[0] / ((size_t)T * d * 4);
-    if (h >= 1 && h <= 64) kHeads = (int)h;
   }
   if (T < 0 || nb[0] != (size_t)kHeads * T * d * 4 || ob != nb[0])
     return kLiteRtStatusErrorInvalidArgument;
@@ -355,7 +377,7 @@ LiteRtStatus AttnRun(void *user_data, size_t num_inputs,
   if (gmode == 2 && T == 1) {
     // decode stream path: O(1) scratch, bit-identical to the memo path
     attn_stream_decode(tq, pk, pv, bb, q, mask, k_new, v_new, lo, live, C, d,
-                       nt, ctx_out, &core->t_dequant);
+                       nt, rows, ctx_out, &core->t_dequant);
   } else {
     const float *K = nullptr, *V = nullptr;
     const tq3_f16 *K16 = nullptr, *V16 = nullptr;
@@ -366,8 +388,8 @@ LiteRtStatus AttnRun(void *user_data, size_t num_inputs,
       tv.resize((size_t)live * d);
 #pragma omp parallel for schedule(static) num_threads(nt)
       for (int j = 0; j < live; ++j) {
-        tq3_dequantize(tq, pk + (size_t)(lo + j) * bb, tk.data() + (size_t)j * d);
-        tq3_dequantize(tq, pv + (size_t)(lo + j) * bb, tv.data() + (size_t)j * d);
+        tq3_dequantize(tq, blk(pk, lo + j, bb, rows), tk.data() + (size_t)j * d);
+        tq3_dequantize(tq, blk(pv, lo + j, bb, rows), tv.data() + (size_t)j * d);
       }
       core->t_dequant += now_s() - td0;
       K = tk.data();
@@ -387,8 +409,8 @@ LiteRtStatus AttnRun(void *user_data, size_t num_inputs,
 #pragma omp parallel for schedule(static) num_threads(nt)
           for (int j = 0; j < live; ++j) {
             float rk[512], rv[512];
-            tq3_dequantize(tq, pk + (size_t)(lo + j) * bb, rk);
-            tq3_dequantize(tq, pv + (size_t)(lo + j) * bb, rv);
+            tq3_dequantize(tq, blk(pk, lo + j, bb, rows), rk);
+            tq3_dequantize(tq, blk(pv, lo + j, bb, rows), rv);
             for (int x = 0; x < d; ++x) {
               mm->kh[(size_t)j * d + x] = (tq3_f16)rk[x];
               mm->vh[(size_t)j * d + x] = (tq3_f16)rv[x];
@@ -399,9 +421,9 @@ LiteRtStatus AttnRun(void *user_data, size_t num_inputs,
           mm->v.resize((size_t)live * d);
 #pragma omp parallel for schedule(static) num_threads(nt)
           for (int j = 0; j < live; ++j) {
-            tq3_dequantize(tq, pk + (size_t)(lo + j) * bb,
+            tq3_dequantize(tq, blk(pk, lo + j, bb, rows),
                            mm->k.data() + (size_t)j * d);
-            tq3_dequantize(tq, pv + (size_t)(lo + j) * bb,
+            tq3_dequantize(tq, blk(pv, lo + j, bb, rows),
                            mm->v.data() + (size_t)j * d);
           }
         }

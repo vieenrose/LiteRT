@@ -33,12 +33,30 @@ CACHE_LEN = 16384
 N_LAYERS = 15
 GLOBAL_EVERY = 5
 GLOBAL_DIM = 512
+KV_BITS = 3
+WINDOW = 0        # >0: sliding layers get WINDOW rows instead of CACHE_LEN
 
 def block_bytes(d):
-    return 4 + (3 * d + 7) // 8
+    if KV_BITS == 16:          # exact fp16: raw storage, no norm, no codes
+        return 2 * d
+    return 4 + (KV_BITS * d + 7) // 8
 
-def main(inp, outp, cache_len=None, n_layers=None, global_every=None, global_dim=None):
-    global CACHE_LEN, N_LAYERS, GLOBAL_EVERY, GLOBAL_DIM
+
+def layer_rows(layer):
+    """Sliding layers only need their attention window; global layers need the
+    full cache. Windowing a global layer would be lossy."""
+    is_global = (layer + 1) % GLOBAL_EVERY == 0
+    if WINDOW and not is_global and WINDOW < CACHE_LEN:
+        return WINDOW
+    return CACHE_LEN
+
+def main(inp, outp, cache_len=None, n_layers=None, global_every=None,
+         global_dim=None, kv_bits=None, window=None):
+    global CACHE_LEN, N_LAYERS, GLOBAL_EVERY, GLOBAL_DIM, KV_BITS, WINDOW
+    if kv_bits:
+        KV_BITS = int(kv_bits)
+    if window:
+        WINDOW = int(window)
     if cache_len:
         CACHE_LEN = int(cache_len)
     if n_layers:
@@ -109,7 +127,7 @@ def main(inp, outp, cache_len=None, n_layers=None, global_every=None, global_dim
             packed = []
             for role in ("k", "v"):
                 t = s.TensorT()
-                t.shape = [CACHE_LEN, block_bytes(d)]
+                t.shape = [layer_rows(layer), block_bytes(d)]
                 t.type = s.TensorType.UINT8
                 t.buffer = 0
                 t.name = f"{prefix}packed_{role}_{layer}"

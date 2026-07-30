@@ -31,13 +31,19 @@ for d in (256, 512):
 
 # 2. codebooks: centroids + decision boundaries exactly as the quantizer sees them
 from turboquant.codebook import get_codebook_tensors
+# b=3 and b=4.  The engine picks the codec by --kv-bits; b=4 costs 32 B more per
+# 256-d block (132 vs 100) for 3.7x lower round-trip NMSE (0.0093 vs 0.0341).
 for d in (256, 512):
-    centroids, boundaries = get_codebook_tensors(d, 3, torch.device("cpu"), torch.float32)
-    dec = boundaries[1:-1].contiguous()  # 7 interior boundaries
-    with open(f"{OUT}/cb_d{d}_b3.bin", "wb") as f:
-        f.write(centroids.numpy().astype(np.float32).tobytes())
-        f.write(dec.numpy().astype(np.float32).tobytes())
-    print(f"cb_d{d}_b3.bin: centroids {centroids.numpy().round(5).tolist()}")
+    for bits in (3, 4):
+        centroids, boundaries = get_codebook_tensors(d, bits, torch.device("cpu"),
+                                                     torch.float32)
+        dec = boundaries[1:-1].contiguous()  # (1<<bits)-1 interior boundaries
+        assert len(centroids) == (1 << bits) and len(dec) == (1 << bits) - 1
+        with open(f"{OUT}/cb_d{d}_b{bits}.bin", "wb") as f:
+            f.write(centroids.numpy().astype(np.float32).tobytes())
+            f.write(dec.numpy().astype(np.float32).tobytes())
+        print(f"cb_d{d}_b{bits}.bin: centroids {centroids.numpy().round(5).tolist()}")
+# NOTE: --kv-bits 16 (exact fp16) needs neither a codebook nor a rotation matrix.
 
 # 3. PLE metadata: locate tensor data span inside model.safetensors
 path = f"{SNAP}/model.safetensors"
