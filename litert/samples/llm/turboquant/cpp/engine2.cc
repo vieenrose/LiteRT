@@ -60,11 +60,14 @@
 namespace {
 
 int kCacheLen = 16384;   // runtime: --cache-len (4k device export uses 4096)
-constexpr int kNumLayers = 15;
+constexpr int kMaxLayers = 64;
+int kNumLayers = 15;     // --layers  (E2B 15 ext pairs, Gemma-3-1B 26)
 constexpr int kPrefill = 128;
-constexpr int kWindow = 512;
-bool is_global_layer(int l) { return l == 4 || l == 9 || l == 14; }
-int layer_dim(int l) { return is_global_layer(l) ? 512 : 256; }
+int kWindow = 512;       // --window
+int kGlobalEvery = 5;    // --global-every (E2B 5 -> 4,9,14; G3-1B 6 -> 5,11,17,23)
+int kGlobalDim = 512;    // --global-dim (G3-1B head_dim is 256 everywhere)
+bool is_global_layer(int l) { return (l + 1) % kGlobalEvery == 0; }
+int layer_dim(int l) { return is_global_layer(l) ? kGlobalDim : 256; }
 
 double now_s() {
   using namespace std::chrono;
@@ -555,13 +558,14 @@ struct Engine {
   bool use_tq = true;
   bool fused = false;   // model consumes packed_* inputs via the custom op
   // packed side-cache: [layer][2(k,v)] -> kCacheLen * block_bytes
-  std::vector<uint8_t> packed[kNumLayers][2];
+  std::vector<uint8_t> packed[kMaxLayers][2];
   std::map<std::string, std::pair<void*, size_t>> ext_inputs;
   double t_model = 0, t_quant = 0, t_dequant = 0, t_glue = 0;
 
   int attn_threads = 8;   // OMP threads for the fused kernel; more
                         // collides with the XNNPACK pool (oversubscription)
   int global_memo = 0;    // 0 full fp32, 1 fp16, 2 stream (see tq3_attn.h)
+  bool has_ple = true;
   std::string ple_table;  // optional standalone PLE table (--ple-table)
   void init(const std::string& model_path, const std::string& final_dir,
             const std::string& assets, int threads,
@@ -576,7 +580,7 @@ struct Engine {
       DIE("tq3_init d=512");
     if (use_tq)
       for (int l = 0; l < kNumLayers; ++l) {
-        size_t bb = (is_global_layer(l) ? tq512 : tq256).block_bytes;
+        size_t bb = (layer_dim(l) == 512 ? tq512 : tq256).block_bytes;
         // +64: LiteRT host-memory buffers require 64-byte alignment
         packed[l][0].assign((size_t)kCacheLen * bb + 64, 0);
         packed[l][1].assign((size_t)kCacheLen * bb + 64, 0);
@@ -589,8 +593,14 @@ struct Engine {
                           /*alias_kv=*/true, &ext_inputs, attn);
     aux = new Component(env, final_dir + "/auxiliary.tflite", threads, "", false);
     emb = new Component(env, final_dir + "/embedder_quantized.tflite", threads, "", false);
-    if (!ple_table.empty()) ple.init_table(ple_table);
-    else ple.init(assets + "/ple.json");
+    has_ple = model->sig("decode").in_idx("per_layer_embeddings") >= 0;
+    if (has_ple) {
+      if (!ple_table.empty()) ple.init_table(ple_table);
+      else ple.init(assets + "/ple.json");
+    } else {
+      fprintf(stderr, "no per_layer_embeddings input: PLE disabled (dense model)"
+              "\n");
+    }
     fused = model->sig("decode").in_idx("packed_k_0") >= 0;
     if (fused && !use_tq) DIE("fused model has no baseline mode");
     fprintf(stderr, "model %s: %s mode\n", model_path.c_str(),
@@ -618,7 +628,7 @@ struct Engine {
       const char role = nm[9];              // 'k' or 'v'
       const int layer = atoi(nm.c_str() + 11);
       const int d = layer_dim(layer);
-      tq3_ctx* q = is_global_layer(layer) ? &tq512 : &tq256;
+      tq3_ctx* q = layer_dim(layer) == 512 ? &tq512 : &tq256;
       const float* s = (const float*)Component::lock_r(io.out[oi]);
       LiteRtTensorBuffer cb = nullptr;
       float* dst = nullptr;
@@ -672,7 +682,7 @@ struct Engine {
   float verify_packed(int layer, int lo, int hi) {
     if (!use_tq || fused) return -1.f;
     const int d = layer_dim(layer);
-    tq3_ctx* q = is_global_layer(layer) ? &tq512 : &tq256;
+    tq3_ctx* q = layer_dim(layer) == 512 ? &tq512 : &tq256;
     float deq[512], m = 0.f;
     for (int role = 0; role < 2; ++role) {
       std::string nm = std::string("kv_cache_") + (role ? "v" : "k") + "_" + std::to_string(layer);
@@ -734,6 +744,7 @@ struct Engine {
     if (o < 0 || mi < 0) DIE("embeddings io");
     Component::copy_buf(esig.out[o], target.in[mi],
                         Component::buf_bytes(target.in[mi]));
+    if (!has_ple) return;
     int pl = target.in_idx("per_layer_embeddings");
     if (pl < 0) DIE("ple input");
     float* p = (float*)Component::lock_w(target.in[pl]);
@@ -842,6 +853,10 @@ int main(int argc, char** argv) {
     else if (a == "--weight-cache") weight_cache = next();
     else if (a == "--ple-table") ple_table = next();
     else if (a == "--cache-len") kCacheLen = atoi(next().c_str());
+    else if (a == "--layers") kNumLayers = atoi(next().c_str());
+    else if (a == "--window") kWindow = atoi(next().c_str());
+    else if (a == "--global-every") kGlobalEvery = atoi(next().c_str());
+    else if (a == "--global-dim") kGlobalDim = atoi(next().c_str());
     else DIE("unknown arg %s", a.c_str());
   }
   if (final_dir.empty() || assets.empty() || prompt_file.empty())

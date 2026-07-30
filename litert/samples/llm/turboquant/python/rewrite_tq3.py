@@ -30,15 +30,23 @@ import flatbuffers
 from litert_converter import schema_py_generated as s
 
 CACHE_LEN = 16384
-GLOBAL_LAYERS = {4, 9, 14}
+N_LAYERS = 15
+GLOBAL_EVERY = 5
+GLOBAL_DIM = 512
 
 def block_bytes(d):
     return 4 + (3 * d + 7) // 8
 
-def main(inp, outp, cache_len=None):
-    global CACHE_LEN
+def main(inp, outp, cache_len=None, n_layers=None, global_every=None, global_dim=None):
+    global CACHE_LEN, N_LAYERS, GLOBAL_EVERY, GLOBAL_DIM
     if cache_len:
         CACHE_LEN = int(cache_len)
+    if n_layers:
+        N_LAYERS = int(n_layers)
+    if global_every:
+        GLOBAL_EVERY = int(global_every)
+    if global_dim:
+        GLOBAL_DIM = int(global_dim)
     raw = open(inp, "rb").read()
     model = s.ModelT.InitFromObj(s.Model.GetRootAsModel(bytearray(raw), 0))
 
@@ -93,8 +101,8 @@ def main(inp, outp, cache_len=None):
         n_blocks = 0
 
         prefix = name + "_"
-        for layer in range(15):
-            d = 512 if layer in GLOBAL_LAYERS else 256
+        for layer in range(N_LAYERS):
+            d = GLOBAL_DIM if (layer + 1) % GLOBAL_EVERY == 0 else 256
             kck = byname[f"{prefix}kv_cache_k_{layer}"]
             kcv = byname[f"{prefix}kv_cache_v_{layer}"]
 
@@ -254,4 +262,4 @@ def main(inp, outp, cache_len=None):
           f"(delta {delta:+d})")
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+    main(*sys.argv[1:])

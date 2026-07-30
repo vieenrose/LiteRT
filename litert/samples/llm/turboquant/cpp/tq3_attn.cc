@@ -35,7 +35,7 @@ typedef _Float16 tq3_f16;
 #else
 typedef float tq3_f16;  // GCC without _Float16 (e.g. aarch64 at plain armv8-a)
 #endif
-constexpr int kHeads = 8;
+int kHeads = 8;  // inferred at runtime from the q tensor size
 constexpr float kMaskedBelow = -50.0f;  // mask values are {0, -100}
 constexpr int kTileRows = 1024;         // stream-mode tile (2 MiB at d=512)
 
@@ -322,6 +322,10 @@ LiteRtStatus AttnRun(void *user_data, size_t num_inputs,
   }
   const int d = bb == 100 ? 256 : 512;
   const tq3_ctx *tq = d == 256 ? core->tq256 : core->tq512;
+  if (T > 0 && d > 0) {                 // q is (1,H,T,d) fp32; H varies by model
+    size_t h = nb[0] / ((size_t)T * d * 4);
+    if (h >= 1 && h <= 64) kHeads = (int)h;
+  }
   if (T < 0 || nb[0] != (size_t)kHeads * T * d * 4 || ob != nb[0])
     return kLiteRtStatusErrorInvalidArgument;
   const int W = C + T;  // mask row width
@@ -343,7 +347,9 @@ LiteRtStatus AttnRun(void *user_data, size_t num_inputs,
   const int live = hi - lo;
 
   const int nt = core->threads > 0 ? core->threads : omp_get_max_threads();
-  const int gmode = d == 512 ? core->global_mode : 0;
+  // stream/fp16 memo mitigation applies to whichever layers actually
+  // expose many live rows (global layers), regardless of head_dim.
+  const int gmode = (live > kTileRows) ? core->global_mode : 0;
   const int R = kHeads * T;
 
   if (gmode == 2 && T == 1) {
